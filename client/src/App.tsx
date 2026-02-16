@@ -10,6 +10,7 @@ import Employees from "@/pages/Employees";
 import Trainings from "@/pages/Trainings";
 import Attendance from "@/pages/Attendance";
 import Approvals from "@/pages/Approvals";
+import Reports from "@/pages/Reports";
 import DashboardLayout from "@/components/layout/DashboardLayout";
 import { useUser } from "@/hooks/use-user";
 
@@ -52,9 +53,8 @@ function Router() {
         {() => <ProtectedRoute component={Approvals} />}
       </Route>
 
-      {/* Placeholders for other routes */}
       <Route path="/reports">
-        {() => <ProtectedRoute component={() => <div className="text-center p-10 text-muted-foreground">Reports Module Placeholder</div>} />}
+        {() => <ProtectedRoute component={Reports} />}
       </Route>
 
       <Route component={NotFound} />
