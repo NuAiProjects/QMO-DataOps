@@ -15,10 +15,14 @@ import DashboardLayout from "@/components/layout/DashboardLayout";
 import { useUser } from "@/hooks/use-user";
 
 function ProtectedRoute({ component: Component }: { component: React.ComponentType }) {
-  const { user } = useUser();
-  
+  const { user, isLoading } = useUser();
+
+  if (isLoading) {
+    return null;
+  }
+
   if (!user) {
-    return <Redirect to="/" />;
+    return <Redirect to="/login" />;
   }
 
   return (
@@ -29,9 +33,18 @@ function ProtectedRoute({ component: Component }: { component: React.ComponentTy
 }
 
 function Router() {
+  const { user, isLoading } = useUser();
+
   return (
     <Switch>
-      <Route path="/" component={Login} />
+      <Route path="/">
+        {() => {
+          if (isLoading) return null;
+          return user ? <Redirect to="/dashboard" /> : <Redirect to="/login" />;
+        }}
+      </Route>
+
+      <Route path="/login" component={Login} />
       
       <Route path="/dashboard">
         {() => <ProtectedRoute component={Dashboard} />}
