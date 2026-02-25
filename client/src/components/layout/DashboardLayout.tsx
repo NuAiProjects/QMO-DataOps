@@ -26,7 +26,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Sheet, SheetContent, SheetTrigger } from "@/components/ui/sheet";
-import logo from "@/assets/logo.png";
+import logo from "@/assets/NUlogo-Dark.png";
 import { Input } from "@/components/ui/input";
 import { useQuery } from "@tanstack/react-query";
 import { getQueryFn } from "@/lib/queryClient";
@@ -194,8 +194,11 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
       <div className="p-6 flex items-center gap-3">
         <img src={logo} alt="Logo" className="h-10 w-10 object-contain" />
         <div className="flex flex-col">
-          <span className="font-display font-bold text-lg leading-tight">QMO DataOps</span>
-          <span className="text-xs text-sidebar-foreground/60">National University</span>
+          <span className="font-display font-bold text-lg leading-tight">
+            <span className="block">QMO-Manila</span>
+            <span className="block">DataOps</span>
+          </span>
+          <span className="text-xs text-sidebar-foreground/60">National University Manila</span>
         </div>
       </div>
 

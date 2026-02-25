@@ -11,7 +11,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import logo from "@/assets/logo.png";
+import logo from "@/assets/NUlogo-Dark.png";
 
 function parseErrorMessage(error: unknown) {
   const raw = error instanceof Error ? error.message : "Unable to sign in.";
@@ -82,8 +82,9 @@ export default function Login() {
               className="h-full w-full object-contain"
             />
           </div>
-          <h1 className="text-3xl font-display font-bold text-foreground tracking-tight">
-            QMO DataOps
+          <h1 className="text-3xl font-display font-bold text-foreground tracking-tight leading-tight">
+            <span className="block">QMO-Manila</span>
+            <span className="block">DataOps</span>
           </h1>
           <p className="text-muted-foreground mt-2 text-lg">
             National University Manila
