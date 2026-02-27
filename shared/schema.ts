@@ -1,5 +1,6 @@
 import { sql } from "drizzle-orm";
 import {
+  type AnyPgColumn,
   boolean,
   date,
   integer,
@@ -131,7 +132,7 @@ export const units = pgTable("units", {
   id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
   name: text("name").notNull(),
   code: varchar("code", { length: 50 }),
-  parentUnitId: uuid("parent_unit_id").references(() => units.id, {
+  parentUnitId: uuid("parent_unit_id").references((): AnyPgColumn => units.id, {
     onDelete: "set null",
   }),
   createdAt: timestamp("created_at", { withTimezone: true })
@@ -351,6 +352,7 @@ export type WorkflowEntityType = (typeof workflowEntityTypeEnum.enumValues)[numb
 export type WorkflowAction = (typeof workflowActionEnum.enumValues)[number];
 
 export type User = typeof users.$inferSelect;
+export type InsertUser = z.infer<typeof insertUserSchema>;
 export type NewUser = z.infer<typeof insertUserSchema>;
 export type Unit = typeof units.$inferSelect;
 export type Employee = typeof employees.$inferSelect;

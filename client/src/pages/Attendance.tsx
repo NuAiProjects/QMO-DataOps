@@ -558,7 +558,8 @@ export default function Attendance() {
               <div className="space-y-6">
                 {canEdit ? (
                   <p className="text-xs text-muted-foreground">
-                    CSV schema required: <span className="font-medium">No, Participants, Title, Date</span>
+                    CSV schema required:{" "}
+                    <span className="font-medium">Email, Participants, Date, Title</span>
                   </p>
                 ) : null}
 
@@ -629,7 +630,7 @@ export default function Attendance() {
                       <Table>
                         <TableHeader>
                           <TableRow>
-                            <TableHead>No</TableHead>
+                            <TableHead>Email</TableHead>
                             <TableHead>Participants</TableHead>
                             <TableHead>Date</TableHead>
                             <TableHead>Status</TableHead>
@@ -648,13 +649,14 @@ export default function Attendance() {
                               "attendance date",
                             ]);
                             const participants = getRowField(raw, ["Participants"]);
+                            const email = getRowField(raw, ["Email", "email"]);
                             const key = row.resolvedEmployeeId
                               ? `${row.resolvedEmployeeId}:${attendanceDate}`
                               : "";
                             const isDuplicate = key && duplicateKeySet.has(key);
                             return (
                               <TableRow key={row.id}>
-                                <TableCell>{getRowField(raw, ["No"]) || row.employeeNo}</TableCell>
+                                <TableCell>{email || "-"}</TableCell>
                                 <TableCell>{participants || "-"}</TableCell>
                                 <TableCell>{attendanceDate || "-"}</TableCell>
                                 <TableCell>

@@ -52,7 +52,6 @@ type EmployeeStatus = "active" | "inactive";
 
 type Employee = {
   id: string;
-  employeeNo: string;
   fullName: string;
   email: string | null;
   unitId: string;
@@ -96,7 +95,6 @@ type AttendanceResponse = {
 };
 
 type EmployeeForm = {
-  employeeNo: string;
   fullName: string;
   email: string;
   unitId: string;
@@ -148,7 +146,6 @@ export default function Employees() {
   const employeeCsvInputRef = useRef<HTMLInputElement | null>(null);
 
   const [createForm, setCreateForm] = useState<EmployeeForm>({
-    employeeNo: "",
     fullName: "",
     email: "",
     unitId: "",
@@ -156,7 +153,6 @@ export default function Employees() {
     employmentStatus: "active",
   });
   const [editForm, setEditForm] = useState<EmployeeForm>({
-    employeeNo: "",
     fullName: "",
     email: "",
     unitId: "",
@@ -223,7 +219,6 @@ export default function Employees() {
         return true;
       }
       const haystack = [
-        employee.employeeNo,
         employee.fullName,
         employee.email || "",
         employee.position || "",
@@ -243,7 +238,6 @@ export default function Employees() {
 
   const resetCreateForm = () => {
     setCreateForm({
-      employeeNo: "",
       fullName: "",
       email: "",
       unitId: "",
@@ -253,10 +247,10 @@ export default function Employees() {
   };
 
   const handleCreate = async () => {
-    if (!createForm.employeeNo.trim() || !createForm.fullName.trim()) {
+    if (!createForm.fullName.trim() || !createForm.email.trim()) {
       toast({
         variant: "destructive",
-        title: "Employee No and Full Name are required.",
+        title: "Full Name and Email are required.",
       });
       return;
     }
@@ -271,9 +265,8 @@ export default function Employees() {
 
     try {
       await apiRequest("POST", "/api/employees", {
-        employeeNo: createForm.employeeNo.trim(),
         fullName: createForm.fullName.trim(),
-        email: toNullableString(createForm.email),
+        email: createForm.email.trim().toLowerCase(),
         unitId,
         position: toNullableString(createForm.position),
         employmentStatus: createForm.employmentStatus,
@@ -305,7 +298,6 @@ export default function Employees() {
   const openEditDialog = (employee: Employee) => {
     setSelectedEmployee(employee);
     setEditForm({
-      employeeNo: employee.employeeNo,
       fullName: employee.fullName,
       email: employee.email || "",
       unitId: employee.unitId,
@@ -317,10 +309,10 @@ export default function Employees() {
 
   const handleEditSave = async () => {
     if (!selectedEmployee) return;
-    if (!editForm.employeeNo.trim() || !editForm.fullName.trim()) {
+    if (!editForm.fullName.trim() || !editForm.email.trim()) {
       toast({
         variant: "destructive",
-        title: "Employee No and Full Name are required.",
+        title: "Full Name and Email are required.",
       });
       return;
     }
@@ -335,9 +327,8 @@ export default function Employees() {
 
     try {
       await apiRequest("PUT", `/api/employees/${selectedEmployee.id}`, {
-        employeeNo: editForm.employeeNo.trim(),
         fullName: editForm.fullName.trim(),
-        email: toNullableString(editForm.email),
+        email: editForm.email.trim().toLowerCase(),
         unitId,
         position: toNullableString(editForm.position),
         employmentStatus: editForm.employmentStatus,
@@ -391,22 +382,22 @@ export default function Employees() {
     }
 
     const headers = [
-      "Employee No",
-      "Full Name",
-      "Email",
-      "Department",
-      "Position",
-      "Employment Status",
+      "No.",
+      "NU Email",
+      "Full Name (Last Name, First Name Middle Name)",
+      "ASP/Official/Faculty",
+      "Department/College",
+      "Division",
     ];
 
-    const rows = filteredEmployees.map((employee) =>
+    const rows = filteredEmployees.map((employee, index) =>
       [
-        employee.employeeNo,
-        employee.fullName,
+        String(index + 1),
         employee.email || "",
-        unitMap.get(employee.unitId) || "",
+        employee.fullName,
         employee.position || "",
-        employee.employmentStatus,
+        unitMap.get(employee.unitId) || "",
+        "",
       ]
         .map(csvEscape)
         .join(","),
@@ -539,13 +530,6 @@ export default function Employees() {
               </DialogHeader>
               <div className="space-y-3">
                 <Input
-                  placeholder="Employee No"
-                  value={createForm.employeeNo}
-                  onChange={(e) =>
-                    setCreateForm((prev) => ({ ...prev, employeeNo: e.target.value }))
-                  }
-                />
-                <Input
                   placeholder="Full Name"
                   value={createForm.fullName}
                   onChange={(e) =>
@@ -553,7 +537,7 @@ export default function Employees() {
                   }
                 />
                 <Input
-                  placeholder="Email (optional)"
+                  placeholder="Email"
                   value={createForm.email}
                   onChange={(e) =>
                     setCreateForm((prev) => ({ ...prev, email: e.target.value }))
@@ -666,16 +650,19 @@ export default function Employees() {
       </div>
 
       {canEdit ? (
-        <p className="text-xs text-muted-foreground">
-          Bulk upload CSV required columns: <span className="font-medium">Employee No, Full Name, Department</span>. Optional columns: Email, Position, Employment Status.
-        </p>
+      <p className="text-xs text-muted-foreground">
+          Bulk upload CSV required columns:{" "}
+          <span className="font-medium">
+            No., NU Email, Full Name (Last Name, First Name Middle Name), ASP/Official/Faculty, Department/College, Division
+          </span>
+          .
+      </p>
       ) : null}
 
       <div className="rounded-md border border-border bg-card shadow-sm">
         <Table>
           <TableHeader>
             <TableRow className="bg-muted/50">
-              <TableHead className="w-[120px]">ID</TableHead>
               <TableHead>Name</TableHead>
               <TableHead>Department</TableHead>
               <TableHead>Position</TableHead>
@@ -686,14 +673,13 @@ export default function Employees() {
           <TableBody>
             {filteredEmployees.length === 0 ? (
               <TableRow>
-                <TableCell colSpan={6} className="h-24 text-center text-muted-foreground">
+                <TableCell colSpan={5} className="h-24 text-center text-muted-foreground">
                   No employee records found.
                 </TableCell>
               </TableRow>
             ) : (
               filteredEmployees.map((employee) => (
                 <TableRow key={employee.id}>
-                  <TableCell className="font-mono text-xs">{employee.employeeNo}</TableCell>
                   <TableCell>
                     <div className="flex flex-col">
                       <span className="font-medium">{employee.fullName}</span>
@@ -762,10 +748,6 @@ export default function Employees() {
           {selectedEmployee ? (
             <div className="space-y-3 text-sm">
               <div className="grid grid-cols-[140px_1fr] gap-2">
-                <span className="text-muted-foreground">Employee No</span>
-                <span className="font-medium">{selectedEmployee.employeeNo}</span>
-              </div>
-              <div className="grid grid-cols-[140px_1fr] gap-2">
                 <span className="text-muted-foreground">Full Name</span>
                 <span className="font-medium">{selectedEmployee.fullName}</span>
               </div>
@@ -800,13 +782,6 @@ export default function Employees() {
           </DialogHeader>
           <div className="space-y-3">
             <Input
-              placeholder="Employee No"
-              value={editForm.employeeNo}
-              onChange={(e) =>
-                setEditForm((prev) => ({ ...prev, employeeNo: e.target.value }))
-              }
-            />
-            <Input
               placeholder="Full Name"
               value={editForm.fullName}
               onChange={(e) =>
@@ -814,7 +789,7 @@ export default function Employees() {
               }
             />
             <Input
-              placeholder="Email (optional)"
+              placeholder="Email"
               value={editForm.email}
               onChange={(e) =>
                 setEditForm((prev) => ({ ...prev, email: e.target.value }))

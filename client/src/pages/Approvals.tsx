@@ -70,19 +70,19 @@ const typeBadgeClassByType: Record<ApprovalItem["type"], string> = {
 };
 
 export default function Approvals() {
-  const { data } = useQuery({
+  const { data } = useQuery<any>({
     queryKey: ["/api/approvals"],
     queryFn: getQueryFn({ on401: "throw" }),
   });
-  const { data: trainingEventsData } = useQuery({
+  const { data: trainingEventsData } = useQuery<any>({
     queryKey: ["/api/training-events"],
     queryFn: getQueryFn({ on401: "throw" }),
   });
-  const { data: employeesData } = useQuery({
+  const { data: employeesData } = useQuery<any>({
     queryKey: ["/api/employees"],
     queryFn: getQueryFn({ on401: "throw" }),
   });
-  const { data: unitsData } = useQuery({
+  const { data: unitsData } = useQuery<any>({
     queryKey: ["/api/units"],
     queryFn: getQueryFn({ on401: "throw" }),
   });
@@ -93,15 +93,15 @@ export default function Approvals() {
   const employees = employeesData?.employees ?? [];
   const units = unitsData?.units ?? [];
 
-  const trainingById = useMemo(() => {
+  const trainingById = useMemo<Map<string, any>>(() => {
     return new Map(trainingEvents.map((event: any) => [event.id, event]));
   }, [trainingEvents]);
 
-  const employeeById = useMemo(() => {
+  const employeeById = useMemo<Map<string, any>>(() => {
     return new Map(employees.map((employee: any) => [employee.id, employee]));
   }, [employees]);
 
-  const unitById = useMemo(() => {
+  const unitById = useMemo<Map<string, any>>(() => {
     return new Map(units.map((unit: any) => [unit.id, unit]));
   }, [units]);
 

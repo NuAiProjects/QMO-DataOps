@@ -87,9 +87,8 @@ const userInputSchema = z.object({
 });
 
 const employeeInputSchema = z.object({
-  employeeNo: z.string().min(1),
   fullName: z.string().min(1),
-  email: z.string().email().optional().nullable(),
+  email: z.string().email(),
   unitId: z.string().uuid(),
   position: z.string().optional().nullable(),
   employmentStatus: z.enum(["active", "inactive"]).optional(),
@@ -143,11 +142,40 @@ const commitImportSchema = z.object({
     .optional(),
 });
 
-const requiredAttendanceCsvHeaders = ["No", "Participants", "Title", "Date"] as const;
-const requiredEmployeeCsvHeaders = ["Employee No", "Full Name", "Department"] as const;
+const requiredAttendanceCsvHeaders = ["Email", "Participants", "Date", "Title"] as const;
+const requiredEmployeeCsvHeaders = [
+  "No.",
+  "NU Email",
+  "Full Name (Last Name, First Name Middle Name)",
+  "ASP/Official/Faculty",
+  "Department/College",
+  "Division",
+] as const;
+const malformedNuEmployeeCsvHeaders = [
+  "No.",
+  "NU Email",
+  "Full Name (Last Name",
+  "First Name Middle Name)",
+  "ASP/Official/Faculty",
+  "Department/College",
+] as const;
+const legacyRequiredEmployeeCsvHeaders = [
+  "Email",
+  "Full Name",
+  "Department",
+  "Position",
+  "Employment Status",
+] as const;
 
 function normalizeCsvText(value: string | null | undefined) {
-  return (value ?? "").trim().toLowerCase();
+  return (value ?? "")
+    .trim()
+    .replace(/\s+/g, " ")
+    .toLowerCase();
+}
+
+function normalizeLooseCsvText(value: string | null | undefined) {
+  return normalizeCsvText(value).replace(/[^a-z0-9]/g, "");
 }
 
 function getCsvRowValue(row: Record<string, string>, keys: string[]) {
@@ -158,6 +186,17 @@ function getCsvRowValue(row: Record<string, string>, keys: string[]) {
     }
   }
   return "";
+}
+
+function getRouteParam(value: string | string[] | undefined) {
+  if (Array.isArray(value)) {
+    return value[0] ?? "";
+  }
+  return value ?? "";
+}
+
+function buildNameUnitKey(fullName: string, unitId: string) {
+  return `${normalizeCsvText(fullName)}::${normalizeCsvText(unitId)}`;
 }
 
 function toIsoDate(year: number, month: number, day: number) {
@@ -302,8 +341,10 @@ const reportQuerySchema = z.object({
   to: z.string().optional(),
   unitId: z.string().uuid().optional(),
   includeChildren: z.string().optional(),
+  page: z.coerce.number().int().min(1).optional(),
   format: z.enum(["csv"]).optional(),
 });
+const REPORT_PAGE_SIZE = 20;
 
 const dashboardActivityQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(50).optional(),
@@ -349,6 +390,24 @@ function toCsv<T extends Record<string, any>>(rows: T[]) {
   return lines.join("\n");
 }
 
+function paginateReportRows<T>(rows: T[], page: number) {
+  const total = rows.length;
+  const totalPages = total === 0 ? 1 : Math.ceil(total / REPORT_PAGE_SIZE);
+  const currentPage = Math.min(Math.max(page, 1), totalPages);
+  const startIndex = (currentPage - 1) * REPORT_PAGE_SIZE;
+  const pagedRows = rows.slice(startIndex, startIndex + REPORT_PAGE_SIZE);
+
+  return {
+    rows: pagedRows,
+    pagination: {
+      page: currentPage,
+      pageSize: REPORT_PAGE_SIZE,
+      total,
+      totalPages,
+    },
+  };
+}
+
 export async function registerRoutes(
   httpServer: Server,
   app: Express,
@@ -359,7 +418,7 @@ export async function registerRoutes(
   api.use(requireAuth);
 
   api.get("/units", async (req, res) => {
-    const scopeUnits = await getUnitsInScopeForUser(req.user);
+    const scopeUnits = await getUnitsInScopeForUser(req.user!);
     res.json({ units: scopeUnits });
   });
 
@@ -370,7 +429,7 @@ export async function registerRoutes(
     }
     const [unit] = await db.insert(units).values(parsed.data).returning();
     await logAudit({
-      actorUserId: req.user.id,
+      actorUserId: req.user!.id,
       action: "unit.create",
       entityType: "unit",
       entityId: unit.id,
@@ -385,7 +444,7 @@ export async function registerRoutes(
     if (!parsed.success) {
       return res.status(400).json({ message: parsed.error.flatten() });
     }
-    const unitId = req.params.id;
+    const unitId = getRouteParam(req.params.id);
     const [existing] = await db
       .select()
       .from(units)
@@ -400,7 +459,7 @@ export async function registerRoutes(
       .where(eq(units.id, unitId))
       .returning();
     await logAudit({
-      actorUserId: req.user.id,
+      actorUserId: req.user!.id,
       action: "unit.update",
       entityType: "unit",
       entityId: unitId,
@@ -440,7 +499,7 @@ export async function registerRoutes(
         .values(unitIds.map((unitId) => ({ userId: created.id, unitId })));
     }
     await logAudit({
-      actorUserId: req.user.id,
+      actorUserId: req.user!.id,
       action: "user.create",
       entityType: "user",
       entityId: created.id,
@@ -455,7 +514,7 @@ export async function registerRoutes(
     if (!parsed.success) {
       return res.status(400).json({ message: parsed.error.flatten() });
     }
-    const userId = req.params.id;
+    const userId = getRouteParam(req.params.id);
     const [existing] = await db
       .select()
       .from(users)
@@ -481,7 +540,7 @@ export async function registerRoutes(
         .values(unitIds.map((unitId) => ({ userId, unitId })));
     }
     await logAudit({
-      actorUserId: req.user.id,
+      actorUserId: req.user!.id,
       action: "user.update",
       entityType: "user",
       entityId: userId,
@@ -493,7 +552,7 @@ export async function registerRoutes(
   });
 
   api.get("/employees", async (req, res) => {
-    const scopeUnitIds = await getScopedUnitIds(req.user);
+    const scopeUnitIds = await getScopedUnitIds(req.user!);
     if (scopeUnitIds.length === 0) {
       return res.json({ employees: [] });
     }
@@ -549,19 +608,30 @@ export async function registerRoutes(
       if (!parsed.success) {
         return res.status(400).json({ message: parsed.error.flatten() });
       }
-      const scopeUnitIds = await getScopedUnitIds(req.user);
+      const scopeUnitIds = await getScopedUnitIds(req.user!);
       if (!scopeUnitIds.includes(parsed.data.unitId)) {
         return res.status(403).json({ message: "Unit out of scope." });
+      }
+      const normalizedEmail = parsed.data.email.trim().toLowerCase();
+      const [emailInUse] = await db
+        .select({ id: employees.id })
+        .from(employees)
+        .where(ilike(employees.email, normalizedEmail))
+        .limit(1);
+      if (emailInUse) {
+        return res.status(409).json({ message: "An employee with this email already exists." });
       }
       const [created] = await db
         .insert(employees)
         .values({
+          employeeNo: normalizedEmail,
           ...parsed.data,
+          email: normalizedEmail,
           employmentStatus: parsed.data.employmentStatus ?? "active",
         })
         .returning();
       await logAudit({
-        actorUserId: req.user.id,
+        actorUserId: req.user!.id,
         action: "employee.create",
         entityType: "employee",
         entityId: created.id,
@@ -593,17 +663,26 @@ export async function registerRoutes(
           skip_empty_lines: true,
           trim: true,
           bom: true,
+          relax_column_count: true,
         }) as Record<string, string>[];
       } catch {
         return res.status(400).json({ message: "Invalid CSV format." });
       }
 
-      const hasRequiredHeaders = requiredEmployeeCsvHeaders.every((header) =>
+      const hasNuTemplateHeaders = requiredEmployeeCsvHeaders.every((header) =>
         parsedHeaders.includes(header),
       );
-      if (!hasRequiredHeaders) {
+      const hasMalformedNuHeaders = malformedNuEmployeeCsvHeaders.every((header) =>
+        parsedHeaders.includes(header),
+      );
+      const hasLegacyHeaders = legacyRequiredEmployeeCsvHeaders.every((header) =>
+        parsedHeaders.includes(header),
+      );
+      const useMalformedNuMapping = hasMalformedNuHeaders && !hasNuTemplateHeaders;
+      if (!hasNuTemplateHeaders && !hasMalformedNuHeaders && !hasLegacyHeaders) {
         return res.status(400).json({
-          message: "Invalid CSV schema. Required columns are: Employee No, Full Name, Department.",
+          message:
+            "Invalid CSV schema. Required columns are either NU template (No., NU Email, Full Name (Last Name, First Name Middle Name), ASP/Official/Faculty, Department/College, Division), malformed NU header variant, or legacy template (Email, Full Name, Department, Position, Employment Status).",
         });
       }
 
@@ -611,7 +690,7 @@ export async function registerRoutes(
         return res.status(400).json({ message: "CSV has no data rows." });
       }
 
-      const scopeUnitIds = await getScopedUnitIds(req.user);
+      const scopeUnitIds = await getScopedUnitIds(req.user!);
       if (scopeUnitIds.length === 0) {
         return res.status(403).json({ message: "No units in scope." });
       }
@@ -626,35 +705,109 @@ export async function registerRoutes(
         .where(inArray(units.id, scopeUnitIds));
 
       const unitLookup = new Map<string, string>();
+      const registerUnitLookup = (
+        value: string | null | undefined,
+        unitId: string,
+      ) => {
+        const normalized = normalizeCsvText(value);
+        const normalizedLoose = normalizeLooseCsvText(value);
+        if (normalized) {
+          unitLookup.set(normalized, unitId);
+        }
+        if (normalizedLoose) {
+          unitLookup.set(normalizedLoose, unitId);
+        }
+      };
+      const resolveUnitLookup = (value: string) =>
+        unitLookup.get(normalizeCsvText(value)) ??
+        unitLookup.get(normalizeLooseCsvText(value));
       for (const unit of scopedUnits) {
-        unitLookup.set(normalizeCsvText(unit.id), unit.id);
-        unitLookup.set(normalizeCsvText(unit.name), unit.id);
-        if (unit.code) {
-          unitLookup.set(normalizeCsvText(unit.code), unit.id);
+        registerUnitLookup(unit.id, unit.id);
+        registerUnitLookup(unit.name, unit.id);
+        registerUnitLookup(unit.code, unit.id);
+      }
+      const canCreateUnits = req.user!.role === "super_admin";
+      const createUnitIfMissing = async (
+        rawName: string,
+        parentUnitId?: string | null,
+      ): Promise<string | undefined> => {
+        const name = rawName.trim();
+        if (!name) return undefined;
+        const matched = resolveUnitLookup(name);
+        if (matched) return matched;
+        if (!canCreateUnits) return undefined;
+        const [createdUnit] = await db
+          .insert(units)
+          .values({
+            name,
+            code: null,
+            parentUnitId: parentUnitId ?? undefined,
+          })
+          .returning({
+            id: units.id,
+            name: units.name,
+            code: units.code,
+          });
+        registerUnitLookup(createdUnit.id, createdUnit.id);
+        registerUnitLookup(createdUnit.name, createdUnit.id);
+        registerUnitLookup(createdUnit.code, createdUnit.id);
+        return createdUnit.id;
+      };
+
+      const scopedEmployees = await db
+        .select({
+          id: employees.id,
+          employeeNo: employees.employeeNo,
+          fullName: employees.fullName,
+          email: employees.email,
+          unitId: employees.unitId,
+        })
+        .from(employees)
+        .where(inArray(employees.unitId, scopeUnitIds));
+
+      const existingByEmail = new Map<
+        string,
+        (typeof scopedEmployees)[number]
+      >();
+      const scopedEmployeeIds = new Set<string>();
+      const globalEmployeeByEmail = new Map<string, { id: string; unitId: string }>();
+      const globalEmailCounts = new Map<string, number>();
+      const processedCsvEmails = new Set<string>();
+
+      for (const existing of scopedEmployees) {
+        scopedEmployeeIds.add(existing.id);
+        if (existing.email) {
+          existingByEmail.set(normalizeCsvText(existing.email), existing);
         }
       }
-
-      const employeeNos = records
-        .map((row) =>
-          getCsvRowValue(row, ["Employee No", "employeeNo", "employee_no", "No", "ID"]),
-        )
-        .filter((value) => value.length > 0);
-
-      const existingRows =
-        employeeNos.length === 0
-          ? []
-          : await db
-              .select({
-                id: employees.id,
-                employeeNo: employees.employeeNo,
-                unitId: employees.unitId,
-              })
-              .from(employees)
-              .where(inArray(employees.employeeNo, employeeNos));
-
-      const existingByEmployeeNo = new Map(
-        existingRows.map((row) => [normalizeCsvText(row.employeeNo), row]),
-      );
+      const allEmployeesWithEmail = await db
+        .select({
+          id: employees.id,
+          email: employees.email,
+          unitId: employees.unitId,
+        })
+        .from(employees)
+        .where(sql`${employees.email} is not null`);
+      for (const existing of allEmployeesWithEmail) {
+        if (!existing.email) continue;
+        const normalizedGlobalEmail = normalizeCsvText(existing.email);
+        globalEmailCounts.set(
+          normalizedGlobalEmail,
+          (globalEmailCounts.get(normalizedGlobalEmail) ?? 0) + 1,
+        );
+        if (!globalEmployeeByEmail.has(normalizedGlobalEmail)) {
+          globalEmployeeByEmail.set(normalizedGlobalEmail, {
+            id: existing.id,
+            unitId: existing.unitId,
+          });
+        }
+      }
+      const duplicateGlobalEmails = new Set<string>();
+      for (const [emailKey, count] of globalEmailCounts.entries()) {
+        if (count > 1) {
+          duplicateGlobalEmails.add(emailKey);
+        }
+      }
 
       const summary = {
         total: records.length,
@@ -666,24 +819,60 @@ export async function registerRoutes(
 
       for (let index = 0; index < records.length; index += 1) {
         const row = records[index];
-        const employeeNo = getCsvRowValue(row, [
-          "Employee No",
-          "employeeNo",
-          "employee_no",
-          "No",
-          "ID",
-        ]);
-        const fullName = getCsvRowValue(row, ["Full Name", "fullName", "full_name", "Name"]);
-        const department = getCsvRowValue(row, [
-          "Department",
-          "department",
-          "Unit",
-          "Unit Name",
-          "unitId",
-          "Unit ID",
-        ]);
-        const email = getCsvRowValue(row, ["Email", "email"]);
-        const position = getCsvRowValue(row, ["Position", "position"]);
+        const fullName = useMalformedNuMapping
+          ? getCsvRowValue(row, [
+              "Full Name (Last Name",
+              "Full Name (Last Name, First Name Middle Name)",
+              "Full Name",
+              "fullName",
+              "full_name",
+              "Name",
+            ])
+          : getCsvRowValue(row, [
+              "Full Name (Last Name, First Name Middle Name)",
+              "Full Name",
+              "fullName",
+              "full_name",
+              "Name",
+            ]);
+        const department = useMalformedNuMapping
+          ? getCsvRowValue(row, [
+              "ASP/Official/Faculty",
+              "Department/College",
+              "Department",
+              "department",
+              "Unit",
+              "Unit Name",
+              "unitId",
+              "Unit ID",
+            ])
+          : getCsvRowValue(row, [
+              "Department/College",
+              "Department",
+              "department",
+              "Unit",
+              "Unit Name",
+              "unitId",
+              "Unit ID",
+            ]);
+        const division = useMalformedNuMapping
+          ? getCsvRowValue(row, ["Department/College", "Division", "division"])
+          : getCsvRowValue(row, ["Division", "division"]);
+        const email = getCsvRowValue(row, ["NU Email", "Email", "email"]);
+        const positionRaw = getCsvRowValue(row, ["Position", "position"]);
+        const employeeType = useMalformedNuMapping
+          ? getCsvRowValue(row, [
+              "First Name Middle Name)",
+              "ASP/Official/Faculty",
+              "Employee Type",
+              "Type",
+            ])
+          : getCsvRowValue(row, [
+              "ASP/Official/Faculty",
+              "Employee Type",
+              "Type",
+            ]);
+        const position = positionRaw || employeeType;
         const employmentStatusRaw = getCsvRowValue(row, [
           "Employment Status",
           "employmentStatus",
@@ -691,38 +880,73 @@ export async function registerRoutes(
           "status",
         ]);
 
-        if (!employeeNo || !fullName || !department) {
+        if (!fullName) {
           summary.invalid += 1;
           errors.push({
             row: index + 2,
-            employeeNo: employeeNo || "",
-            message: "Employee No, Full Name, and Department are required.",
+            employeeNo: email || fullName || "",
+            message: "Full Name is required.",
           });
           continue;
         }
 
-        const unitId = unitLookup.get(normalizeCsvText(department));
+        const normalizedEmail = normalizeCsvText(email);
+        if (!normalizedEmail) {
+          summary.invalid += 1;
+          errors.push({
+            row: index + 2,
+            employeeNo: fullName,
+            message: "NU Email is required.",
+          });
+          continue;
+        }
+        const isEmailValid = z.string().email().safeParse(normalizedEmail).success;
+        if (!isEmailValid) {
+          summary.invalid += 1;
+          errors.push({
+            row: index + 2,
+            employeeNo: email || fullName,
+            message: "Invalid email format.",
+          });
+          continue;
+        }
+        if (duplicateGlobalEmails.has(normalizedEmail)) {
+          summary.invalid += 1;
+          errors.push({
+            row: index + 2,
+            employeeNo: email || fullName,
+            message:
+              "This email already has duplicate employee records. Resolve duplicates first, then re-upload.",
+          });
+          continue;
+        }
+        if (processedCsvEmails.has(normalizedEmail)) {
+          summary.invalid += 1;
+          errors.push({
+            row: index + 2,
+            employeeNo: email || fullName,
+            message: "Duplicate NU Email in uploaded CSV.",
+          });
+          continue;
+        }
+
+        const resolvedDepartmentLabel = department || division || "Unassigned";
+        let unitId = resolveUnitLookup(resolvedDepartmentLabel);
+        if (!unitId) {
+          const divisionId =
+            division && normalizeCsvText(division) !== normalizeCsvText(resolvedDepartmentLabel)
+              ? await createUnitIfMissing(division)
+              : undefined;
+          unitId = await createUnitIfMissing(resolvedDepartmentLabel, divisionId);
+        }
         if (!unitId) {
           summary.invalid += 1;
           errors.push({
             row: index + 2,
-            employeeNo,
+            employeeNo: email || fullName,
             message: "Department not found or out of scope.",
           });
           continue;
-        }
-
-        if (email) {
-          const isEmailValid = z.string().email().safeParse(email).success;
-          if (!isEmailValid) {
-            summary.invalid += 1;
-            errors.push({
-              row: index + 2,
-              employeeNo,
-              message: "Invalid email format.",
-            });
-            continue;
-          }
         }
 
         let employmentStatus: "active" | "inactive" = "active";
@@ -732,7 +956,7 @@ export async function registerRoutes(
             summary.invalid += 1;
             errors.push({
               row: index + 2,
-              employeeNo,
+              employeeNo: email || fullName,
               message: "Employment Status must be active or inactive.",
             });
             continue;
@@ -740,22 +964,24 @@ export async function registerRoutes(
           employmentStatus = normalizedStatus;
         }
 
-        const existing = existingByEmployeeNo.get(normalizeCsvText(employeeNo));
+        const existing = existingByEmail.get(normalizedEmail);
+        const existingGlobal = globalEmployeeByEmail.get(normalizedEmail);
+        if (!existing && existingGlobal && !scopedEmployeeIds.has(existingGlobal.id)) {
+          summary.invalid += 1;
+          errors.push({
+            row: index + 2,
+            employeeNo: email || fullName,
+            message: "Email already exists outside your accessible scope.",
+          });
+          continue;
+        }
         if (existing) {
-          if (!scopeUnitIds.includes(existing.unitId)) {
-            summary.invalid += 1;
-            errors.push({
-              row: index + 2,
-              employeeNo,
-              message: "Employee exists but is outside your unit scope.",
-            });
-            continue;
-          }
           const [updated] = await db
             .update(employees)
             .set({
               fullName,
-              email: email || null,
+              email: normalizedEmail,
+              employeeNo: normalizedEmail,
               unitId,
               position: position || null,
               employmentStatus,
@@ -763,11 +989,12 @@ export async function registerRoutes(
             })
             .where(eq(employees.id, existing.id))
             .returning();
-          existingByEmployeeNo.set(normalizeCsvText(employeeNo), {
+          existingByEmail.set(normalizedEmail, updated);
+          globalEmployeeByEmail.set(normalizedEmail, {
             id: updated.id,
-            employeeNo: updated.employeeNo,
             unitId: updated.unitId,
           });
+          processedCsvEmails.add(normalizedEmail);
           summary.updated += 1;
           continue;
         }
@@ -776,33 +1003,35 @@ export async function registerRoutes(
           const [created] = await db
             .insert(employees)
             .values({
-              employeeNo,
+              employeeNo: normalizedEmail,
               fullName,
-              email: email || null,
+              email: normalizedEmail,
               unitId,
               position: position || null,
               employmentStatus,
               hireDate: null,
             })
             .returning();
-          existingByEmployeeNo.set(normalizeCsvText(created.employeeNo), {
+          existingByEmail.set(normalizedEmail, created);
+          scopedEmployeeIds.add(created.id);
+          globalEmployeeByEmail.set(normalizedEmail, {
             id: created.id,
-            employeeNo: created.employeeNo,
             unitId: created.unitId,
           });
+          processedCsvEmails.add(normalizedEmail);
           summary.created += 1;
         } catch {
           summary.invalid += 1;
           errors.push({
             row: index + 2,
-            employeeNo,
+            employeeNo: email || fullName,
             message: "Unable to create employee row.",
           });
         }
       }
 
       await logAudit({
-        actorUserId: req.user.id,
+        actorUserId: req.user!.id,
         action: "employee.import",
         entityType: "employee",
         entityId: null,
@@ -828,7 +1057,7 @@ export async function registerRoutes(
       if (!parsed.success) {
         return res.status(400).json({ message: parsed.error.flatten() });
       }
-      const employeeId = req.params.id;
+      const employeeId = getRouteParam(req.params.id);
       const [existing] = await db
         .select()
         .from(employees)
@@ -837,20 +1066,47 @@ export async function registerRoutes(
       if (!existing) {
         return res.status(404).json({ message: "Employee not found." });
       }
-      const scopeUnitIds = await getScopedUnitIds(req.user);
+      const scopeUnitIds = await getScopedUnitIds(req.user!);
       if (!scopeUnitIds.includes(existing.unitId)) {
         return res.status(403).json({ message: "Unit out of scope." });
       }
       if (parsed.data.unitId && !scopeUnitIds.includes(parsed.data.unitId)) {
         return res.status(403).json({ message: "Target unit out of scope." });
       }
+      const incomingEmail =
+        typeof parsed.data.email === "string"
+          ? parsed.data.email.trim().toLowerCase()
+          : undefined;
+      if (parsed.data.email !== undefined && !incomingEmail) {
+        return res.status(400).json({ message: "Email is required." });
+      }
+      if (incomingEmail) {
+        const [duplicateEmail] = await db
+          .select({ id: employees.id })
+          .from(employees)
+          .where(and(ilike(employees.email, incomingEmail), sql`${employees.id} <> ${employeeId}`))
+          .limit(1);
+        if (duplicateEmail) {
+          return res.status(409).json({ message: "An employee with this email already exists." });
+        }
+      }
+      const nextEmail = incomingEmail ?? existing.email;
+      if (!nextEmail) {
+        return res.status(400).json({ message: "Employee email is required." });
+      }
+      const { email: _ignoredEmail, ...rest } = parsed.data;
       const [updated] = await db
         .update(employees)
-        .set({ ...parsed.data, updatedAt: new Date() })
+        .set({
+          ...rest,
+          email: nextEmail,
+          employeeNo: nextEmail,
+          updatedAt: new Date(),
+        })
         .where(eq(employees.id, employeeId))
         .returning();
       await logAudit({
-        actorUserId: req.user.id,
+        actorUserId: req.user!.id,
         action: "employee.update",
         entityType: "employee",
         entityId: employeeId,
@@ -863,14 +1119,14 @@ export async function registerRoutes(
   );
 
   api.get("/training-events", async (req, res) => {
-    const scopeUnitIds = await getScopedUnitIds(req.user);
+    const scopeUnitIds = await getScopedUnitIds(req.user!);
     if (scopeUnitIds.length === 0) {
       return res.json({ trainingEvents: [] });
     }
     const querySchema = z.object({
       unitId: z.string().uuid().optional(),
       includeChildren: z.string().optional(),
-      status: z.string().optional(),
+      status: z.enum(["draft", "submitted", "returned", "approved", "locked"]).optional(),
     });
     const parsed = querySchema.safeParse(req.query);
     if (!parsed.success) {
@@ -907,7 +1163,7 @@ export async function registerRoutes(
       if (!parsed.success) {
         return res.status(400).json({ message: parsed.error.flatten() });
       }
-      const scopeUnitIds = await getScopedUnitIds(req.user);
+      const scopeUnitIds = await getScopedUnitIds(req.user!);
       if (!scopeUnitIds.includes(parsed.data.ownerUnitId)) {
         return res.status(403).json({ message: "Unit out of scope." });
       }
@@ -918,12 +1174,12 @@ export async function registerRoutes(
           hours: parsed.data.hours.toString(),
           visibilityScope: parsed.data.visibilityScope ?? "unit",
           isMandatory: parsed.data.isMandatory ?? false,
-          createdBy: req.user.id,
-          updatedBy: req.user.id,
+          createdBy: req.user!.id,
+          updatedBy: req.user!.id,
         })
         .returning();
       await logAudit({
-        actorUserId: req.user.id,
+        actorUserId: req.user!.id,
         action: "training_event.create",
         entityType: "training_event",
         entityId: created.id,
@@ -942,7 +1198,7 @@ export async function registerRoutes(
       if (!parsed.success) {
         return res.status(400).json({ message: parsed.error.flatten() });
       }
-      const eventId = req.params.id;
+      const eventId = getRouteParam(req.params.id);
       const [existing] = await db
         .select()
         .from(trainingEvents)
@@ -951,7 +1207,7 @@ export async function registerRoutes(
       if (!existing) {
         return res.status(404).json({ message: "Training event not found." });
       }
-      const scopeUnitIds = await getScopedUnitIds(req.user);
+      const scopeUnitIds = await getScopedUnitIds(req.user!);
       if (!scopeUnitIds.includes(existing.ownerUnitId)) {
         return res.status(403).json({ message: "Unit out of scope." });
       }
@@ -966,13 +1222,13 @@ export async function registerRoutes(
         .set({
           ...parsed.data,
           hours: parsed.data.hours ? parsed.data.hours.toString() : undefined,
-          updatedBy: req.user.id,
+          updatedBy: req.user!.id,
           updatedAt: new Date(),
         })
         .where(eq(trainingEvents.id, eventId))
         .returning();
       await logAudit({
-        actorUserId: req.user.id,
+        actorUserId: req.user!.id,
         action: "training_event.update",
         entityType: "training_event",
         entityId: eventId,
@@ -988,7 +1244,7 @@ export async function registerRoutes(
     "/training-events/:id/submit",
     requireAnyRoleOrSuperAdmin(["encoder", "unit_head"]),
     async (req, res) => {
-      const eventId = req.params.id;
+      const eventId = getRouteParam(req.params.id);
       const [existing] = await db
         .select()
         .from(trainingEvents)
@@ -997,7 +1253,7 @@ export async function registerRoutes(
       if (!existing) {
         return res.status(404).json({ message: "Training event not found." });
       }
-      const scopeUnitIds = await getScopedUnitIds(req.user);
+      const scopeUnitIds = await getScopedUnitIds(req.user!);
       if (!scopeUnitIds.includes(existing.ownerUnitId)) {
         return res.status(403).json({ message: "Unit out of scope." });
       }
@@ -1008,7 +1264,7 @@ export async function registerRoutes(
         .update(trainingEvents)
         .set({
           workflowStatus: "submitted",
-          updatedBy: req.user.id,
+          updatedBy: req.user!.id,
           updatedAt: new Date(),
         })
         .where(eq(trainingEvents.id, eventId))
@@ -1017,10 +1273,10 @@ export async function registerRoutes(
         entityType: "training_event",
         entityId: eventId,
         action: "submit",
-        actorUserId: req.user.id,
+        actorUserId: req.user!.id,
       });
       await logAudit({
-        actorUserId: req.user.id,
+        actorUserId: req.user!.id,
         action: "training_event.submit",
         entityType: "training_event",
         entityId: eventId,
@@ -1040,7 +1296,7 @@ export async function registerRoutes(
       if (!parsed.success) {
         return res.status(400).json({ message: parsed.error.flatten() });
       }
-      const eventId = req.params.id;
+      const eventId = getRouteParam(req.params.id);
       const [existing] = await db
         .select()
         .from(trainingEvents)
@@ -1049,7 +1305,7 @@ export async function registerRoutes(
       if (!existing) {
         return res.status(404).json({ message: "Training event not found." });
       }
-      const scopeUnitIds = await getScopedUnitIds(req.user);
+      const scopeUnitIds = await getScopedUnitIds(req.user!);
       if (!scopeUnitIds.includes(existing.ownerUnitId)) {
         return res.status(403).json({ message: "Unit out of scope." });
       }
@@ -1061,7 +1317,7 @@ export async function registerRoutes(
         .set({
           workflowStatus: "returned",
           returnNotes: parsed.data.notes,
-          updatedBy: req.user.id,
+          updatedBy: req.user!.id,
           updatedAt: new Date(),
         })
         .where(eq(trainingEvents.id, eventId))
@@ -1070,11 +1326,11 @@ export async function registerRoutes(
         entityType: "training_event",
         entityId: eventId,
         action: "return",
-        actorUserId: req.user.id,
+        actorUserId: req.user!.id,
         notes: parsed.data.notes,
       });
       await logAudit({
-        actorUserId: req.user.id,
+        actorUserId: req.user!.id,
         action: "training_event.return",
         entityType: "training_event",
         entityId: eventId,
@@ -1090,7 +1346,7 @@ export async function registerRoutes(
     "/training-events/:id/approve",
     requireRole(["super_admin", "hr_qa_approver"]),
     async (req, res) => {
-      const eventId = req.params.id;
+      const eventId = getRouteParam(req.params.id);
       const [existing] = await db
         .select()
         .from(trainingEvents)
@@ -1099,7 +1355,7 @@ export async function registerRoutes(
       if (!existing) {
         return res.status(404).json({ message: "Training event not found." });
       }
-      const scopeUnitIds = await getScopedUnitIds(req.user);
+      const scopeUnitIds = await getScopedUnitIds(req.user!);
       if (!scopeUnitIds.includes(existing.ownerUnitId)) {
         return res.status(403).json({ message: "Unit out of scope." });
       }
@@ -1110,7 +1366,7 @@ export async function registerRoutes(
         .update(trainingEvents)
         .set({
           workflowStatus: "approved",
-          updatedBy: req.user.id,
+          updatedBy: req.user!.id,
           updatedAt: new Date(),
         })
         .where(eq(trainingEvents.id, eventId))
@@ -1119,10 +1375,10 @@ export async function registerRoutes(
         entityType: "training_event",
         entityId: eventId,
         action: "approve",
-        actorUserId: req.user.id,
+        actorUserId: req.user!.id,
       });
       await logAudit({
-        actorUserId: req.user.id,
+        actorUserId: req.user!.id,
         action: "training_event.approve",
         entityType: "training_event",
         entityId: eventId,
@@ -1138,7 +1394,7 @@ export async function registerRoutes(
     "/training-events/:id/lock",
     requireRole(["super_admin", "hr_qa_approver"]),
     async (req, res) => {
-      const eventId = req.params.id;
+      const eventId = getRouteParam(req.params.id);
       const [existing] = await db
         .select()
         .from(trainingEvents)
@@ -1147,7 +1403,7 @@ export async function registerRoutes(
       if (!existing) {
         return res.status(404).json({ message: "Training event not found." });
       }
-      const scopeUnitIds = await getScopedUnitIds(req.user);
+      const scopeUnitIds = await getScopedUnitIds(req.user!);
       if (!scopeUnitIds.includes(existing.ownerUnitId)) {
         return res.status(403).json({ message: "Unit out of scope." });
       }
@@ -1160,7 +1416,7 @@ export async function registerRoutes(
         .update(trainingEvents)
         .set({
           workflowStatus: "locked",
-          updatedBy: req.user.id,
+          updatedBy: req.user!.id,
           updatedAt: new Date(),
         })
         .where(eq(trainingEvents.id, eventId))
@@ -1169,10 +1425,10 @@ export async function registerRoutes(
         entityType: "training_event",
         entityId: eventId,
         action: "lock",
-        actorUserId: req.user.id,
+        actorUserId: req.user!.id,
       });
       await logAudit({
-        actorUserId: req.user.id,
+        actorUserId: req.user!.id,
         action: "training_event.lock",
         entityType: "training_event",
         entityId: eventId,
@@ -1188,7 +1444,7 @@ export async function registerRoutes(
     "/training-events/:id/reopen",
     requireRole(["super_admin", "hr_qa_approver"]),
     async (req, res) => {
-      const eventId = req.params.id;
+      const eventId = getRouteParam(req.params.id);
       const [existing] = await db
         .select()
         .from(trainingEvents)
@@ -1197,7 +1453,7 @@ export async function registerRoutes(
       if (!existing) {
         return res.status(404).json({ message: "Training event not found." });
       }
-      const scopeUnitIds = await getScopedUnitIds(req.user);
+      const scopeUnitIds = await getScopedUnitIds(req.user!);
       if (!scopeUnitIds.includes(existing.ownerUnitId)) {
         return res.status(403).json({ message: "Unit out of scope." });
       }
@@ -1208,7 +1464,7 @@ export async function registerRoutes(
         .update(trainingEvents)
         .set({
           workflowStatus: "draft",
-          updatedBy: req.user.id,
+          updatedBy: req.user!.id,
           updatedAt: new Date(),
         })
         .where(eq(trainingEvents.id, eventId))
@@ -1217,10 +1473,10 @@ export async function registerRoutes(
         entityType: "training_event",
         entityId: eventId,
         action: "reopen",
-        actorUserId: req.user.id,
+        actorUserId: req.user!.id,
       });
       await logAudit({
-        actorUserId: req.user.id,
+        actorUserId: req.user!.id,
         action: "training_event.reopen",
         entityType: "training_event",
         entityId: eventId,
@@ -1233,7 +1489,7 @@ export async function registerRoutes(
   );
 
   api.get("/attendance", async (req, res) => {
-    const scopeUnitIds = await getScopedUnitIds(req.user);
+    const scopeUnitIds = await getScopedUnitIds(req.user!);
     if (scopeUnitIds.length === 0) {
       return res.json({ attendance: [] });
     }
@@ -1304,7 +1560,7 @@ export async function registerRoutes(
       if (!trainingEventRow) {
         return res.status(404).json({ message: "Training event not found." });
       }
-      const scopeUnitIds = await getScopedUnitIds(req.user);
+      const scopeUnitIds = await getScopedUnitIds(req.user!);
       if (!scopeUnitIds.includes(employeeRow.unitId)) {
         return res.status(403).json({ message: "Unit out of scope." });
       }
@@ -1337,12 +1593,12 @@ export async function registerRoutes(
           ...parsed.data,
           hoursCredited: parsed.data.hoursCredited.toString(),
           attendanceStatus: parsed.data.attendanceStatus ?? "present",
-          createdBy: req.user.id,
-          updatedBy: req.user.id,
+          createdBy: req.user!.id,
+          updatedBy: req.user!.id,
         })
         .returning();
       await logAudit({
-        actorUserId: req.user.id,
+        actorUserId: req.user!.id,
         action: "attendance.create",
         entityType: "attendance_record",
         entityId: created.id,
@@ -1361,7 +1617,7 @@ export async function registerRoutes(
       if (!parsed.success) {
         return res.status(400).json({ message: parsed.error.flatten() });
       }
-      const attendanceId = req.params.id;
+      const attendanceId = getRouteParam(req.params.id);
       const [existing] = await db
         .select()
         .from(attendanceRecords)
@@ -1389,7 +1645,7 @@ export async function registerRoutes(
       if (!trainingEventRow) {
         return res.status(404).json({ message: "Training event not found." });
       }
-      const scopeUnitIds = await getScopedUnitIds(req.user);
+      const scopeUnitIds = await getScopedUnitIds(req.user!);
       if (!scopeUnitIds.includes(employeeRow.unitId)) {
         return res.status(403).json({ message: "Unit out of scope." });
       }
@@ -1403,13 +1659,13 @@ export async function registerRoutes(
           hoursCredited: parsed.data.hoursCredited
             ? parsed.data.hoursCredited.toString()
             : undefined,
-          updatedBy: req.user.id,
+          updatedBy: req.user!.id,
           updatedAt: new Date(),
         })
         .where(eq(attendanceRecords.id, attendanceId))
         .returning();
       await logAudit({
-        actorUserId: req.user.id,
+        actorUserId: req.user!.id,
         action: "attendance.update",
         entityType: "attendance_record",
         entityId: attendanceId,
@@ -1425,7 +1681,7 @@ export async function registerRoutes(
     "/attendance/:id/submit",
     requireAnyRoleOrSuperAdmin(["encoder", "unit_head"]),
     async (req, res) => {
-      const attendanceId = req.params.id;
+      const attendanceId = getRouteParam(req.params.id);
       const [existing] = await db
         .select()
         .from(attendanceRecords)
@@ -1441,7 +1697,7 @@ export async function registerRoutes(
         .update(attendanceRecords)
         .set({
           workflowStatus: "submitted",
-          updatedBy: req.user.id,
+          updatedBy: req.user!.id,
           updatedAt: new Date(),
         })
         .where(eq(attendanceRecords.id, attendanceId))
@@ -1450,10 +1706,10 @@ export async function registerRoutes(
         entityType: "attendance_record",
         entityId: attendanceId,
         action: "submit",
-        actorUserId: req.user.id,
+        actorUserId: req.user!.id,
       });
       await logAudit({
-        actorUserId: req.user.id,
+        actorUserId: req.user!.id,
         action: "attendance.submit",
         entityType: "attendance_record",
         entityId: attendanceId,
@@ -1473,7 +1729,7 @@ export async function registerRoutes(
       if (!parsed.success) {
         return res.status(400).json({ message: parsed.error.flatten() });
       }
-      const attendanceId = req.params.id;
+      const attendanceId = getRouteParam(req.params.id);
       const [existing] = await db
         .select()
         .from(attendanceRecords)
@@ -1482,7 +1738,7 @@ export async function registerRoutes(
       if (!existing) {
         return res.status(404).json({ message: "Attendance record not found." });
       }
-      const scopeUnitIds = await getScopedUnitIds(req.user);
+      const scopeUnitIds = await getScopedUnitIds(req.user!);
       const allowed = await isEntityInScope("attendance_record", attendanceId, scopeUnitIds);
       if (!allowed) {
         return res.status(403).json({ message: "Unit out of scope." });
@@ -1495,7 +1751,7 @@ export async function registerRoutes(
         .set({
           workflowStatus: "returned",
           returnNotes: parsed.data.notes,
-          updatedBy: req.user.id,
+          updatedBy: req.user!.id,
           updatedAt: new Date(),
         })
         .where(eq(attendanceRecords.id, attendanceId))
@@ -1504,11 +1760,11 @@ export async function registerRoutes(
         entityType: "attendance_record",
         entityId: attendanceId,
         action: "return",
-        actorUserId: req.user.id,
+        actorUserId: req.user!.id,
         notes: parsed.data.notes,
       });
       await logAudit({
-        actorUserId: req.user.id,
+        actorUserId: req.user!.id,
         action: "attendance.return",
         entityType: "attendance_record",
         entityId: attendanceId,
@@ -1524,7 +1780,7 @@ export async function registerRoutes(
     "/attendance/:id/approve",
     requireRole(["super_admin", "hr_qa_approver"]),
     async (req, res) => {
-      const attendanceId = req.params.id;
+      const attendanceId = getRouteParam(req.params.id);
       const [existing] = await db
         .select()
         .from(attendanceRecords)
@@ -1533,7 +1789,7 @@ export async function registerRoutes(
       if (!existing) {
         return res.status(404).json({ message: "Attendance record not found." });
       }
-      const scopeUnitIds = await getScopedUnitIds(req.user);
+      const scopeUnitIds = await getScopedUnitIds(req.user!);
       const allowed = await isEntityInScope("attendance_record", attendanceId, scopeUnitIds);
       if (!allowed) {
         return res.status(403).json({ message: "Unit out of scope." });
@@ -1545,7 +1801,7 @@ export async function registerRoutes(
         .update(attendanceRecords)
         .set({
           workflowStatus: "approved",
-          updatedBy: req.user.id,
+          updatedBy: req.user!.id,
           updatedAt: new Date(),
         })
         .where(eq(attendanceRecords.id, attendanceId))
@@ -1554,10 +1810,10 @@ export async function registerRoutes(
         entityType: "attendance_record",
         entityId: attendanceId,
         action: "approve",
-        actorUserId: req.user.id,
+        actorUserId: req.user!.id,
       });
       await logAudit({
-        actorUserId: req.user.id,
+        actorUserId: req.user!.id,
         action: "attendance.approve",
         entityType: "attendance_record",
         entityId: attendanceId,
@@ -1573,7 +1829,7 @@ export async function registerRoutes(
     "/attendance/:id/lock",
     requireRole(["super_admin", "hr_qa_approver"]),
     async (req, res) => {
-      const attendanceId = req.params.id;
+      const attendanceId = getRouteParam(req.params.id);
       const [existing] = await db
         .select()
         .from(attendanceRecords)
@@ -1582,7 +1838,7 @@ export async function registerRoutes(
       if (!existing) {
         return res.status(404).json({ message: "Attendance record not found." });
       }
-      const scopeUnitIds = await getScopedUnitIds(req.user);
+      const scopeUnitIds = await getScopedUnitIds(req.user!);
       const allowed = await isEntityInScope("attendance_record", attendanceId, scopeUnitIds);
       if (!allowed) {
         return res.status(403).json({ message: "Unit out of scope." });
@@ -1596,7 +1852,7 @@ export async function registerRoutes(
         .update(attendanceRecords)
         .set({
           workflowStatus: "locked",
-          updatedBy: req.user.id,
+          updatedBy: req.user!.id,
           updatedAt: new Date(),
         })
         .where(eq(attendanceRecords.id, attendanceId))
@@ -1605,10 +1861,10 @@ export async function registerRoutes(
         entityType: "attendance_record",
         entityId: attendanceId,
         action: "lock",
-        actorUserId: req.user.id,
+        actorUserId: req.user!.id,
       });
       await logAudit({
-        actorUserId: req.user.id,
+        actorUserId: req.user!.id,
         action: "attendance.lock",
         entityType: "attendance_record",
         entityId: attendanceId,
@@ -1624,7 +1880,7 @@ export async function registerRoutes(
     "/attendance/:id/reopen",
     requireRole(["super_admin", "hr_qa_approver"]),
     async (req, res) => {
-      const attendanceId = req.params.id;
+      const attendanceId = getRouteParam(req.params.id);
       const [existing] = await db
         .select()
         .from(attendanceRecords)
@@ -1633,7 +1889,7 @@ export async function registerRoutes(
       if (!existing) {
         return res.status(404).json({ message: "Attendance record not found." });
       }
-      const scopeUnitIds = await getScopedUnitIds(req.user);
+      const scopeUnitIds = await getScopedUnitIds(req.user!);
       const allowed = await isEntityInScope("attendance_record", attendanceId, scopeUnitIds);
       if (!allowed) {
         return res.status(403).json({ message: "Unit out of scope." });
@@ -1645,7 +1901,7 @@ export async function registerRoutes(
         .update(attendanceRecords)
         .set({
           workflowStatus: "draft",
-          updatedBy: req.user.id,
+          updatedBy: req.user!.id,
           updatedAt: new Date(),
         })
         .where(eq(attendanceRecords.id, attendanceId))
@@ -1654,10 +1910,10 @@ export async function registerRoutes(
         entityType: "attendance_record",
         entityId: attendanceId,
         action: "reopen",
-        actorUserId: req.user.id,
+        actorUserId: req.user!.id,
       });
       await logAudit({
-        actorUserId: req.user.id,
+        actorUserId: req.user!.id,
         action: "attendance.reopen",
         entityType: "attendance_record",
         entityId: attendanceId,
@@ -1694,7 +1950,7 @@ export async function registerRoutes(
           message: "Training event status does not allow attendance import.",
         });
       }
-      const scopeUnitIds = await getScopedUnitIds(req.user);
+      const scopeUnitIds = await getScopedUnitIds(req.user!);
       if (!scopeUnitIds.includes(trainingEvent.ownerUnitId)) {
         return res.status(403).json({ message: "Unit out of scope." });
       }
@@ -1727,7 +1983,7 @@ export async function registerRoutes(
         );
       if (!hasExpectedHeaders || !hasOnlyExpectedHeaders) {
         return res.status(400).json({
-          message: "Invalid CSV schema. Required columns are: No, Participants, Title, Date.",
+          message: "Invalid CSV schema. Required columns are: Email, Participants, Date, Title.",
         });
       }
 
@@ -1735,40 +1991,45 @@ export async function registerRoutes(
         .select({
           id: employees.id,
           employeeNo: employees.employeeNo,
+          email: employees.email,
           fullName: employees.fullName,
         })
         .from(employees)
         .where(inArray(employees.unitId, scopeUnitIds));
 
-      const employeeNoMap = new Map(
-        employeeRows.map((row) => [normalizeCsvText(row.employeeNo), row]),
-      );
       type ScopedEmployee = (typeof employeeRows)[number];
-      const employeeNameMap = new Map<string, ScopedEmployee[]>();
+      const employeeEmailMap = new Map<string, ScopedEmployee[]>();
       for (const employee of employeeRows) {
-        const key = normalizeCsvText(employee.fullName);
-        const list = employeeNameMap.get(key) ?? [];
+        if (!employee.email) continue;
+        const key = normalizeCsvText(employee.email);
+        const list = employeeEmailMap.get(key) ?? [];
         list.push(employee);
-        employeeNameMap.set(key, list);
+        employeeEmailMap.set(key, list);
       }
 
-      const rowsToInsert = [];
+      const rowsToInsert: Array<{
+        rawRowJson: Record<string, string>;
+        employeeNo: string;
+        resolvedEmployeeId?: string;
+        matchStatus: "matched" | "unmatched" | "invalid";
+        errorMessage: string | null;
+      }> = [];
       let matched = 0;
       let unmatched = 0;
       let invalid = 0;
 
       for (const row of records) {
-        const noValue = (row.No ?? "").trim();
+        const emailValue = (row.Email ?? "").trim();
         const participantsValue = (row.Participants ?? "").trim();
         const titleValue = (row.Title ?? "").trim();
         const dateValue = (row.Date ?? "").trim();
 
-        if (!participantsValue || !titleValue || !dateValue) {
+        if (!titleValue || !dateValue) {
           rowsToInsert.push({
             rawRowJson: row,
-            employeeNo: noValue || participantsValue || "unknown",
+            employeeNo: emailValue || participantsValue || "unknown",
             matchStatus: "invalid",
-            errorMessage: "Missing required values for Participants, Title, or Date.",
+            errorMessage: "Missing required values for Title or Date.",
           });
           invalid += 1;
           continue;
@@ -1778,7 +2039,7 @@ export async function registerRoutes(
         if (!normalizedDate) {
           rowsToInsert.push({
             rawRowJson: row,
-            employeeNo: noValue || participantsValue,
+            employeeNo: emailValue || participantsValue,
             matchStatus: "invalid",
             errorMessage:
               "Date must be in YYYY-MM-DD, MM/DD/YYYY, or DD-MMM-YY format.",
@@ -1786,31 +2047,48 @@ export async function registerRoutes(
           invalid += 1;
           continue;
         }
-
-        let matchedEmployee = noValue
-          ? employeeNoMap.get(normalizeCsvText(noValue))
-          : undefined;
-        if (!matchedEmployee) {
-          const byName = employeeNameMap.get(normalizeCsvText(participantsValue)) ?? [];
-          if (byName.length > 1) {
-            rowsToInsert.push({
-              rawRowJson: { ...row, Date: normalizedDate },
-              employeeNo: noValue || participantsValue,
-              matchStatus: "unmatched",
-              errorMessage: "Multiple employees matched Participants. Resolve manually.",
-            });
-            unmatched += 1;
-            continue;
-          }
-          matchedEmployee = byName[0];
+        const normalizedEmail = normalizeCsvText(emailValue);
+        if (!normalizedEmail) {
+          rowsToInsert.push({
+            rawRowJson: { ...row, Date: normalizedDate },
+            employeeNo: participantsValue || "unknown",
+            matchStatus: "invalid",
+            errorMessage: "Email is required and is used as the unique employee key.",
+          });
+          invalid += 1;
+          continue;
+        }
+        const isEmailValid = z.string().email().safeParse(normalizedEmail).success;
+        if (!isEmailValid) {
+          rowsToInsert.push({
+            rawRowJson: { ...row, Date: normalizedDate },
+            employeeNo: emailValue,
+            matchStatus: "invalid",
+            errorMessage: "Invalid email format in Email column.",
+          });
+          invalid += 1;
+          continue;
         }
 
+        const employeeMatches = employeeEmailMap.get(normalizedEmail) ?? [];
+        if (employeeMatches.length > 1) {
+          rowsToInsert.push({
+            rawRowJson: { ...row, Date: normalizedDate },
+            employeeNo: emailValue,
+            matchStatus: "unmatched",
+            errorMessage:
+              "Multiple employees share this email. Resolve employee duplicates first.",
+          });
+          unmatched += 1;
+          continue;
+        }
+        const matchedEmployee = employeeMatches[0];
         if (!matchedEmployee) {
           rowsToInsert.push({
             rawRowJson: { ...row, Date: normalizedDate },
-            employeeNo: noValue || participantsValue,
+            employeeNo: emailValue,
             matchStatus: "unmatched",
-            errorMessage: "Employee not found using No or Participants.",
+            errorMessage: "Employee not found by Email.",
           });
           unmatched += 1;
           continue;
@@ -1818,7 +2096,7 @@ export async function registerRoutes(
 
         rowsToInsert.push({
           rawRowJson: { ...row, Date: normalizedDate },
-          employeeNo: noValue || matchedEmployee.employeeNo,
+          employeeNo: matchedEmployee.email || matchedEmployee.employeeNo,
           resolvedEmployeeId: matchedEmployee.id,
           matchStatus: "matched",
           errorMessage: null,
@@ -1830,7 +2108,7 @@ export async function registerRoutes(
         .insert(attendanceImportBatches)
         .values({
           trainingEventId,
-          uploadedBy: req.user.id,
+          uploadedBy: req.user!.id,
           fileName: req.file.originalname,
           status: unmatched > 0 || invalid > 0 ? "needs_review" : "parsed",
           summaryJson: {
@@ -1860,7 +2138,7 @@ export async function registerRoutes(
               .returning();
 
       await logAudit({
-        actorUserId: req.user.id,
+        actorUserId: req.user!.id,
         action: "attendance_import.create",
         entityType: "attendance_import_batch",
         entityId: batch.id,
@@ -1880,7 +2158,7 @@ export async function registerRoutes(
       if (!parsed.success) {
         return res.status(400).json({ message: parsed.error.flatten() });
       }
-      const batchId = req.params.batchId;
+      const batchId = getRouteParam(req.params.batchId);
       const [batch] = await db
         .select()
         .from(attendanceImportBatches)
@@ -1889,7 +2167,7 @@ export async function registerRoutes(
       if (!batch) {
         return res.status(404).json({ message: "Batch not found." });
       }
-      const scopeUnitIds = await getScopedUnitIds(req.user);
+      const scopeUnitIds = await getScopedUnitIds(req.user!);
       for (const resolution of parsed.data.resolutions) {
         if (resolution.markInvalid) {
           await db
@@ -1937,7 +2215,7 @@ export async function registerRoutes(
       if (!parsed.success) {
         return res.status(400).json({ message: parsed.error.flatten() });
       }
-      const batchId = req.params.batchId;
+      const batchId = getRouteParam(req.params.batchId);
       const [batch] = await db
         .select()
         .from(attendanceImportBatches)
@@ -1957,7 +2235,7 @@ export async function registerRoutes(
       if (!trainingEvent) {
         return res.status(404).json({ message: "Training event not found." });
       }
-      const scopeUnitIds = await getScopedUnitIds(req.user);
+      const scopeUnitIds = await getScopedUnitIds(req.user!);
       if (!scopeUnitIds.includes(trainingEvent.ownerUnitId)) {
         return res.status(403).json({ message: "Unit out of scope." });
       }
@@ -1990,10 +2268,12 @@ export async function registerRoutes(
           trainingEvent.hours.toString();
         const attendanceStatus =
           raw.attendance_status || raw.attendanceStatus || raw["Status"] || "present";
-        const normalizedStatus = ["present", "absent", "partial"].includes(
-          attendanceStatus.toLowerCase(),
-        )
-          ? attendanceStatus.toLowerCase()
+        const normalizedStatus: "present" | "absent" | "partial" = [
+          "present",
+          "absent",
+          "partial",
+        ].includes(attendanceStatus.toLowerCase())
+          ? (attendanceStatus.toLowerCase() as "present" | "absent" | "partial")
           : "present";
 
         const [existing] = await db
@@ -2024,7 +2304,7 @@ export async function registerRoutes(
             .set({
               hoursCredited: hoursCredited.toString(),
               attendanceStatus: normalizedStatus,
-              updatedBy: req.user.id,
+              updatedBy: req.user!.id,
               updatedAt: new Date(),
             })
             .where(eq(attendanceRecords.id, existing.id));
@@ -2037,8 +2317,8 @@ export async function registerRoutes(
             hoursCredited: hoursCredited.toString(),
             attendanceStatus: normalizedStatus,
             workflowStatus: "draft",
-            createdBy: req.user.id,
-            updatedBy: req.user.id,
+            createdBy: req.user!.id,
+            updatedBy: req.user!.id,
           });
           results.created += 1;
         }
@@ -2050,7 +2330,7 @@ export async function registerRoutes(
         .where(eq(attendanceImportBatches.id, batchId));
 
       await logAudit({
-        actorUserId: req.user.id,
+        actorUserId: req.user!.id,
         action: "attendance_import.commit",
         entityType: "attendance_import_batch",
         entityId: batchId,
@@ -2078,7 +2358,7 @@ export async function registerRoutes(
       if (!parsed.success) {
         return res.status(400).json({ message: parsed.error.flatten() });
       }
-      const scopeUnitIds = await getScopedUnitIds(req.user);
+      const scopeUnitIds = await getScopedUnitIds(req.user!);
       const allowed = await isEntityInScope(
         parsed.data.entityType,
         parsed.data.entityId,
@@ -2096,12 +2376,12 @@ export async function registerRoutes(
           mimeType: req.file.mimetype,
           sizeBytes: req.file.size,
           storagePath: path.relative(process.cwd(), req.file.path),
-          uploadedBy: req.user.id,
+          uploadedBy: req.user!.id,
         })
         .returning();
 
       await logAudit({
-        actorUserId: req.user.id,
+        actorUserId: req.user!.id,
         action: "attachment.upload",
         entityType: "attachment",
         entityId: attachment.id,
@@ -2114,7 +2394,7 @@ export async function registerRoutes(
   );
 
   api.get("/attachments/:id/download", async (req, res) => {
-    const attachmentId = req.params.id;
+    const attachmentId = getRouteParam(req.params.id);
     const [attachment] = await db
       .select()
       .from(attachments)
@@ -2123,7 +2403,7 @@ export async function registerRoutes(
     if (!attachment) {
       return res.status(404).json({ message: "Attachment not found." });
     }
-    const scopeUnitIds = await getScopedUnitIds(req.user);
+    const scopeUnitIds = await getScopedUnitIds(req.user!);
     const allowed = await isEntityInScope(
       attachment.entityType,
       attachment.entityId,
@@ -2149,7 +2429,7 @@ export async function registerRoutes(
     "/attachments/:id",
     requireRole(["super_admin", "hr_qa_approver"]),
     async (req, res) => {
-      const attachmentId = req.params.id;
+      const attachmentId = getRouteParam(req.params.id);
       const [attachment] = await db
         .select()
         .from(attachments)
@@ -2158,7 +2438,7 @@ export async function registerRoutes(
       if (!attachment) {
         return res.status(404).json({ message: "Attachment not found." });
       }
-      const scopeUnitIds = await getScopedUnitIds(req.user);
+      const scopeUnitIds = await getScopedUnitIds(req.user!);
       const allowed = await isEntityInScope(
         attachment.entityType,
         attachment.entityId,
@@ -2169,7 +2449,7 @@ export async function registerRoutes(
       }
       await db.delete(attachments).where(eq(attachments.id, attachmentId));
       await logAudit({
-        actorUserId: req.user.id,
+        actorUserId: req.user!.id,
         action: "attachment.delete",
         entityType: "attachment",
         entityId: attachmentId,
@@ -2186,7 +2466,7 @@ export async function registerRoutes(
       return res.status(400).json({ message: parsed.error.flatten() });
     }
 
-    const scopeUnitIds = await getScopedUnitIds(req.user);
+    const scopeUnitIds = await getScopedUnitIds(req.user!);
     if (scopeUnitIds.length === 0) {
       return res.json({ activities: [] });
     }
@@ -2324,7 +2604,7 @@ export async function registerRoutes(
       return res.json({ results: [] });
     }
 
-    const scopeUnitIds = await getScopedUnitIds(req.user);
+    const scopeUnitIds = await getScopedUnitIds(req.user!);
     if (scopeUnitIds.length === 0) {
       return res.json({ results: [] });
     }
@@ -2432,9 +2712,18 @@ export async function registerRoutes(
     if (!parsed.success) {
       return res.status(400).json({ message: parsed.error.flatten() });
     }
-    const scopeUnitIds = await getScopedUnitIds(req.user);
+    const requestedPage = parsed.data.page ?? 1;
+    const scopeUnitIds = await getScopedUnitIds(req.user!);
     if (scopeUnitIds.length === 0) {
-      return res.json({ rows: [] });
+      return res.json({
+        rows: [],
+        pagination: {
+          page: requestedPage,
+          pageSize: REPORT_PAGE_SIZE,
+          total: 0,
+          totalPages: 1,
+        },
+      });
     }
     let allowedUnits = scopeUnitIds;
     if (parsed.data.unitId) {
@@ -2479,7 +2768,7 @@ export async function registerRoutes(
       return res.send(csv);
     }
 
-    res.json({ rows });
+    res.json(paginateReportRows(rows, requestedPage));
   });
 
   api.get("/reports/hours-by-unit", async (req, res) => {
@@ -2487,9 +2776,18 @@ export async function registerRoutes(
     if (!parsed.success) {
       return res.status(400).json({ message: parsed.error.flatten() });
     }
-    const scopeUnitIds = await getScopedUnitIds(req.user);
+    const requestedPage = parsed.data.page ?? 1;
+    const scopeUnitIds = await getScopedUnitIds(req.user!);
     if (scopeUnitIds.length === 0) {
-      return res.json({ rows: [] });
+      return res.json({
+        rows: [],
+        pagination: {
+          page: requestedPage,
+          pageSize: REPORT_PAGE_SIZE,
+          total: 0,
+          totalPages: 1,
+        },
+      });
     }
     let allowedUnits = scopeUnitIds;
     if (parsed.data.unitId) {
@@ -2559,7 +2857,7 @@ export async function registerRoutes(
       return res.send(csv);
     }
 
-    res.json({ rows });
+    res.json(paginateReportRows(rows, requestedPage));
   });
 
   api.get("/reports/compliance", async (req, res) => {
@@ -2567,9 +2865,18 @@ export async function registerRoutes(
     if (!parsed.success) {
       return res.status(400).json({ message: parsed.error.flatten() });
     }
-    const scopeUnitIds = await getScopedUnitIds(req.user);
+    const requestedPage = parsed.data.page ?? 1;
+    const scopeUnitIds = await getScopedUnitIds(req.user!);
     if (scopeUnitIds.length === 0) {
-      return res.json({ rows: [] });
+      return res.json({
+        rows: [],
+        pagination: {
+          page: requestedPage,
+          pageSize: REPORT_PAGE_SIZE,
+          total: 0,
+          totalPages: 1,
+        },
+      });
     }
     let allowedUnits = scopeUnitIds;
     if (parsed.data.unitId) {
@@ -2653,14 +2960,14 @@ export async function registerRoutes(
       return res.send(csv);
     }
 
-    res.json({ rows });
+    res.json(paginateReportRows(rows, requestedPage));
   });
 
   api.get(
     "/approvals",
     requireRole(["super_admin", "hr_qa_approver"]),
     async (req, res) => {
-      const scopeUnitIds = await getScopedUnitIds(req.user);
+      const scopeUnitIds = await getScopedUnitIds(req.user!);
       const trainingSubmitted = await db
         .select()
         .from(trainingEvents)
@@ -2775,3 +3082,5 @@ export async function registerRoutes(
   app.use("/api", api);
   return httpServer;
 }
+
+

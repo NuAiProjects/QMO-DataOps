@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   Card,
   CardContent,
@@ -34,12 +34,30 @@ type ReportFilters = {
   includeChildren: boolean;
 };
 
+type ReportPagination = {
+  page: number;
+  pageSize: number;
+  total: number;
+  totalPages: number;
+};
+
+type ReportResponse<T> = {
+  rows: T[];
+  pagination?: ReportPagination;
+};
+
 const buildQuery = (filters: ReportFilters) => {
   const params = new URLSearchParams();
   if (filters.from) params.set("from", filters.from);
   if (filters.to) params.set("to", filters.to);
   if (filters.unitId) params.set("unitId", filters.unitId);
   if (filters.includeChildren) params.set("includeChildren", "true");
+  return params.toString();
+};
+
+const withPage = (query: string, page: number) => {
+  const params = new URLSearchParams(query);
+  params.set("page", String(page));
   return params.toString();
 };
 
@@ -58,8 +76,23 @@ export default function Reports() {
     unitId: "",
     includeChildren: true,
   });
+  const [employeePage, setEmployeePage] = useState(1);
+  const [unitPage, setUnitPage] = useState(1);
+  const [compliancePage, setCompliancePage] = useState(1);
 
-  const query = useMemo(() => buildQuery(filters), [filters]);
+  const baseQuery = useMemo(() => buildQuery(filters), [filters]);
+  const employeeQuery = useMemo(() => withPage(baseQuery, employeePage), [baseQuery, employeePage]);
+  const unitQuery = useMemo(() => withPage(baseQuery, unitPage), [baseQuery, unitPage]);
+  const complianceQuery = useMemo(
+    () => withPage(baseQuery, compliancePage),
+    [baseQuery, compliancePage],
+  );
+
+  useEffect(() => {
+    setEmployeePage(1);
+    setUnitPage(1);
+    setCompliancePage(1);
+  }, [baseQuery]);
 
   const { data: unitData } = useQuery({
     queryKey: ["/api/units"],
@@ -67,22 +100,32 @@ export default function Reports() {
   });
   const units = unitData?.units ?? [];
 
-  const { data: hoursByEmployee } = useQuery({
-    queryKey: ["/api/reports/hours-by-employee", query],
-    queryFn: () => fetchReport("/api/reports/hours-by-employee", query),
+  const { data: hoursByEmployee } = useQuery<ReportResponse<any>>({
+    queryKey: ["/api/reports/hours-by-employee", employeeQuery],
+    queryFn: () => fetchReport("/api/reports/hours-by-employee", employeeQuery),
   });
-  const { data: hoursByUnit } = useQuery({
-    queryKey: ["/api/reports/hours-by-unit", query],
-    queryFn: () => fetchReport("/api/reports/hours-by-unit", query),
+  const { data: hoursByUnit } = useQuery<ReportResponse<any>>({
+    queryKey: ["/api/reports/hours-by-unit", unitQuery],
+    queryFn: () => fetchReport("/api/reports/hours-by-unit", unitQuery),
   });
-  const { data: compliance } = useQuery({
-    queryKey: ["/api/reports/compliance", query],
-    queryFn: () => fetchReport("/api/reports/compliance", query),
+  const { data: compliance } = useQuery<ReportResponse<any>>({
+    queryKey: ["/api/reports/compliance", complianceQuery],
+    queryFn: () => fetchReport("/api/reports/compliance", complianceQuery),
   });
 
   const handleExport = (endpoint: string) => {
-    const exportQuery = `${query}${query ? "&" : ""}format=csv`;
+    const exportQuery = `${baseQuery}${baseQuery ? "&" : ""}format=csv`;
     window.open(`${endpoint}?${exportQuery}`, "_blank");
+  };
+
+  const getPaginationLabel = (data?: ReportResponse<any>) => {
+    const pagination = data?.pagination;
+    if (!pagination || pagination.total === 0) {
+      return "Showing 0 of 0";
+    }
+    const start = (pagination.page - 1) * pagination.pageSize + 1;
+    const end = start + (data?.rows.length ?? 0) - 1;
+    return `Showing ${start}-${end} of ${pagination.total}`;
   };
 
   return (
@@ -185,6 +228,34 @@ export default function Reports() {
               ))}
             </TableBody>
           </Table>
+          <div className="mt-4 flex items-center justify-between text-sm text-muted-foreground">
+            <span>{getPaginationLabel(hoursByEmployee)}</span>
+            <div className="flex items-center gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setEmployeePage((prev) => Math.max(1, prev - 1))}
+                disabled={(hoursByEmployee?.pagination?.page ?? employeePage) <= 1}
+              >
+                Previous
+              </Button>
+              <span>
+                Page {hoursByEmployee?.pagination?.page ?? employeePage} of{" "}
+                {hoursByEmployee?.pagination?.totalPages ?? 1}
+              </span>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setEmployeePage((prev) => prev + 1)}
+                disabled={
+                  (hoursByEmployee?.pagination?.page ?? employeePage) >=
+                  (hoursByEmployee?.pagination?.totalPages ?? 1)
+                }
+              >
+                Next
+              </Button>
+            </div>
+          </div>
         </CardContent>
       </Card>
 
@@ -216,6 +287,34 @@ export default function Reports() {
               ))}
             </TableBody>
           </Table>
+          <div className="mt-4 flex items-center justify-between text-sm text-muted-foreground">
+            <span>{getPaginationLabel(hoursByUnit)}</span>
+            <div className="flex items-center gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setUnitPage((prev) => Math.max(1, prev - 1))}
+                disabled={(hoursByUnit?.pagination?.page ?? unitPage) <= 1}
+              >
+                Previous
+              </Button>
+              <span>
+                Page {hoursByUnit?.pagination?.page ?? unitPage} of{" "}
+                {hoursByUnit?.pagination?.totalPages ?? 1}
+              </span>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setUnitPage((prev) => prev + 1)}
+                disabled={
+                  (hoursByUnit?.pagination?.page ?? unitPage) >=
+                  (hoursByUnit?.pagination?.totalPages ?? 1)
+                }
+              >
+                Next
+              </Button>
+            </div>
+          </div>
         </CardContent>
       </Card>
 
@@ -251,6 +350,34 @@ export default function Reports() {
               ))}
             </TableBody>
           </Table>
+          <div className="mt-4 flex items-center justify-between text-sm text-muted-foreground">
+            <span>{getPaginationLabel(compliance)}</span>
+            <div className="flex items-center gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setCompliancePage((prev) => Math.max(1, prev - 1))}
+                disabled={(compliance?.pagination?.page ?? compliancePage) <= 1}
+              >
+                Previous
+              </Button>
+              <span>
+                Page {compliance?.pagination?.page ?? compliancePage} of{" "}
+                {compliance?.pagination?.totalPages ?? 1}
+              </span>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setCompliancePage((prev) => prev + 1)}
+                disabled={
+                  (compliance?.pagination?.page ?? compliancePage) >=
+                  (compliance?.pagination?.totalPages ?? 1)
+                }
+              >
+                Next
+              </Button>
+            </div>
+          </div>
         </CardContent>
       </Card>
     </div>

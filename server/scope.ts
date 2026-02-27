@@ -16,7 +16,10 @@ export async function getAllUnitIds() {
   return rows.map((row) => row.id);
 }
 
-export async function getScopedUnitIds(user: User) {
+export async function getScopedUnitIds(user: User | undefined) {
+  if (!user) {
+    return [];
+  }
   if (user.role === "super_admin") {
     return getAllUnitIds();
   }
@@ -70,7 +73,7 @@ export function scopedUnitFilter(
   return unitIds.filter((unitId) => scopeUnitIds.includes(unitId));
 }
 
-export async function getUnitsInScopeForUser(user: User) {
+export async function getUnitsInScopeForUser(user: User | undefined) {
   const scopeUnitIds = await getScopedUnitIds(user);
   if (scopeUnitIds.length === 0) return [];
   return db

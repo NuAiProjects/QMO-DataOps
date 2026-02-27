@@ -14,8 +14,10 @@ const SESSION_SECRET = process.env.SESSION_SECRET;
 if (!SESSION_SECRET) {
   throw new Error("SESSION_SECRET is required.");
 }
+const sessionSecret: string = SESSION_SECRET;
 
 const APP_BASE_URL = process.env.APP_BASE_URL || "http://localhost:5000";
+type VerifyCallback = (err: any, user?: any, info?: any) => void;
 
 function getGoogleCallbackUrl() {
   return (
@@ -92,7 +94,7 @@ export async function configureAuth(app: Express) {
         tableName: "session",
         createTableIfMissing: true,
       }),
-      secret: SESSION_SECRET,
+      secret: sessionSecret,
       resave: false,
       saveUninitialized: false,
       cookie: {
@@ -142,7 +144,11 @@ export async function configureAuth(app: Express) {
           callbackURL: getGoogleCallbackUrl(),
           scope: ["openid", "profile", "email"],
         },
-        async (_issuer, profile, done) => {
+        async (
+          _issuer: string,
+          profile: { id?: string; emails?: Array<{ value?: string }> },
+          done: VerifyCallback,
+        ) => {
           try {
             const email = profile?.emails?.[0]?.value?.toLowerCase();
             const subject = profile?.id;
@@ -167,7 +173,7 @@ export async function configureAuth(app: Express) {
             return done(error);
           }
         },
-      ),
+      ) as any,
     );
   } else {
     console.warn("Google SSO not configured. Set GOOGLE_CLIENT_ID/SECRET to enable.");
@@ -197,7 +203,11 @@ export async function configureAuth(app: Express) {
             client: microsoftClient,
             params: { scope: "openid profile email" },
           },
-          async (tokenSet, userinfo, done) => {
+          async (
+            tokenSet: { claims: () => Record<string, any> },
+            userinfo: { email?: string } | undefined,
+            done: VerifyCallback,
+          ) => {
             try {
               const claims = tokenSet.claims();
               const email = (
