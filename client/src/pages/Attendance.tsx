@@ -43,10 +43,12 @@ import { Badge } from "@/components/ui/badge";
 import { Upload, Save, CheckCircle, Search, Check, ChevronsUpDown } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { useQuery } from "@tanstack/react-query";
-import { apiRequest, getQueryFn } from "@/lib/queryClient";
+import { apiRequest, getQueryFn, queryClient } from "@/lib/queryClient";
 import { useUser } from "@/hooks/use-user";
 import { useToast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
+import { LoadingState } from "@/components/ui/loading-state";
+import { Spinner } from "@/components/ui/spinner";
 
 type AttendanceRow = {
   id: string;
@@ -78,11 +80,11 @@ export default function Attendance() {
     attendanceStatus: "present",
   });
 
-  const { data: trainingData } = useQuery({
+  const { data: trainingData, isLoading: trainingsLoading } = useQuery({
     queryKey: ["/api/training-events"],
     queryFn: getQueryFn({ on401: "throw" }),
   });
-  const { data: employeeData } = useQuery({
+  const { data: employeeData, isLoading: employeesLoading } = useQuery({
     queryKey: ["/api/employees"],
     queryFn: getQueryFn({ on401: "throw" }),
   });
@@ -91,7 +93,7 @@ export default function Attendance() {
   const activeEvents = events.filter((event: any) => event.workflowStatus !== "draft");
   const selectedEvent = events.find((event: any) => event.id === selectedEventId);
 
-  const { data: attendanceData, refetch: refetchAttendance } = useQuery({
+  const { data: attendanceData, refetch: refetchAttendance, isLoading: attendanceLoading } = useQuery({
     queryKey: ["/api/attendance", selectedEventId],
     queryFn: async () => {
       if (!selectedEventId) return { attendance: [] };
@@ -106,8 +108,13 @@ export default function Attendance() {
 
   const attendance = attendanceData?.attendance ?? [];
   const employees = employeeData?.employees ?? [];
-  const canSubmit = ["encoder", "unit_head", "super_admin"].includes(user?.role || "");
-  const canEdit = ["encoder", "unit_head", "super_admin"].includes(user?.role || "");
+  const isPageLoading = trainingsLoading || employeesLoading;
+  const role = user?.role || "";
+  const canSubmit = ["encoder", "unit_head", "super_admin"].includes(role);
+  const canManageAttendance = ["encoder", "unit_head", "super_admin", "hr_qa_approver"].includes(
+    role,
+  );
+  const canBulkImport = ["encoder", "unit_head", "super_admin"].includes(role);
   const selectedManualEmployee = employees.find((emp: any) => emp.id === manualForm.employeeId);
 
   const employeeMap = useMemo(() => {
@@ -173,6 +180,7 @@ export default function Attendance() {
   }, [selectedEvent?.id, selectedEvent?.hours]);
 
   const handleCsvUpload = async (file: File) => {
+    if (!canBulkImport) return;
     if (!selectedEventId) return;
     try {
       setUploading(true);
@@ -208,6 +216,7 @@ export default function Attendance() {
   };
 
   const handleResolve = async () => {
+    if (!canManageAttendance) return;
     if (!importBatch) return;
     const resolutions = Object.entries(resolveMap).map(([rowId, employeeId]) => ({
       rowId,
@@ -223,6 +232,7 @@ export default function Attendance() {
   };
 
   const handleCommit = async () => {
+    if (!canManageAttendance) return;
     if (!importBatch) return;
     const decisions = Object.entries(decisionMap).map(([rowId, action]) => ({
       rowId,
@@ -238,6 +248,7 @@ export default function Attendance() {
   };
 
   const handleManualCreate = async () => {
+    if (!canManageAttendance) return;
     if (!selectedEventId) return;
     if (!manualForm.employeeId) {
       toast({
@@ -280,6 +291,7 @@ export default function Attendance() {
 
   const submitAttendance = async (attendanceId: string) => {
     await apiRequest("POST", `/api/attendance/${attendanceId}/submit`);
+    await queryClient.invalidateQueries({ queryKey: ["/api/approvals"] });
     await refetchAttendance();
   };
 
@@ -292,6 +304,7 @@ export default function Attendance() {
       );
       const submitted = results.filter((result) => result.status === "fulfilled").length;
       const failed = results.length - submitted;
+      await queryClient.invalidateQueries({ queryKey: ["/api/approvals"] });
       await refetchAttendance();
       if (failed === 0) {
         toast({
@@ -308,6 +321,10 @@ export default function Attendance() {
       setSubmittingAll(false);
     }
   };
+
+  if (isPageLoading) {
+    return <LoadingState label="Loading attendance data..." className="min-h-[420px]" />;
+  }
 
   return (
     <div className="space-y-6">
@@ -377,12 +394,17 @@ export default function Attendance() {
                     onClick={submitAllAttendance}
                     disabled={submittingAll}
                   >
-                    {submittingAll
-                      ? "Submitting..."
-                      : `Submit All (${submittableRows.length})`}
+                    {submittingAll ? (
+                      <>
+                        <Spinner className="mr-2 h-4 w-4" />
+                        Submitting...
+                      </>
+                    ) : (
+                      `Submit All (${submittableRows.length})`
+                    )}
                   </Button>
                 ) : null}
-                {canEdit ? (
+                {canBulkImport ? (
                   <>
                     <Button
                       variant="outline"
@@ -390,8 +412,17 @@ export default function Attendance() {
                       disabled={uploading}
                       onClick={() => csvFileInputRef.current?.click()}
                     >
-                      <Upload className="mr-2 h-4 w-4" />
-                      Bulk Upload CSV
+                      {uploading ? (
+                        <>
+                          <Spinner className="mr-2 h-4 w-4" />
+                          Uploading...
+                        </>
+                      ) : (
+                        <>
+                          <Upload className="mr-2 h-4 w-4" />
+                          Bulk Upload CSV
+                        </>
+                      )}
                     </Button>
                     <input
                       ref={csvFileInputRef}
@@ -404,6 +435,10 @@ export default function Attendance() {
                         e.currentTarget.value = "";
                       }}
                     />
+                  </>
+                ) : null}
+                {canManageAttendance ? (
+                  <>
                     <Dialog
                       open={manualOpen}
                       onOpenChange={(open) => {
@@ -539,7 +574,7 @@ export default function Attendance() {
                     </Dialog>
                   </>
                 ) : null}
-                {canEdit && importBatch && (
+                {canManageAttendance && importBatch && (
                   <Button size="sm" onClick={handleCommit}>
                     <Save className="mr-2 h-4 w-4" />
                     Commit Import
@@ -554,12 +589,16 @@ export default function Attendance() {
                 <CheckCircle className="h-10 w-10 mb-4 opacity-20" />
                 <p>Please select an event to manage attendance</p>
               </div>
+            ) : attendanceLoading ? (
+              <LoadingState label="Loading attendance records..." className="min-h-[320px]" />
             ) : (
               <div className="space-y-6">
-                {canEdit ? (
+                {canBulkImport ? (
                   <p className="text-xs text-muted-foreground">
                     CSV schema required:{" "}
-                    <span className="font-medium">Email, Participants, Date, Title</span>
+                    <span className="font-medium">
+                      Email, Participants, Date, Title (must match selected event)
+                    </span>
                   </p>
                 ) : null}
 
@@ -712,7 +751,7 @@ export default function Attendance() {
                       </Table>
                     </div>
 
-                    {canEdit ? (
+                    {canManageAttendance ? (
                       <div className="flex justify-end">
                         <Button variant="outline" onClick={handleResolve}>
                           Resolve Unmatched

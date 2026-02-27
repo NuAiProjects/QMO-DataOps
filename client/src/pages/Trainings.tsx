@@ -19,6 +19,7 @@ import {
 import { useUser } from "@/hooks/use-user";
 import { useQuery } from "@tanstack/react-query";
 import { apiRequest, getQueryFn, queryClient } from "@/lib/queryClient";
+import { LoadingState } from "@/components/ui/loading-state";
 import {
   Dialog,
   DialogContent,
@@ -59,11 +60,11 @@ export default function Trainings() {
   const canCreate = user?.role !== "viewer_auditor";
   const canSubmit = ["encoder", "unit_head", "super_admin"].includes(user?.role || "");
 
-  const { data } = useQuery({
+  const { data, isLoading: trainingsLoading } = useQuery({
     queryKey: ["/api/training-events"],
     queryFn: getQueryFn({ on401: "throw" }),
   });
-  const { data: unitData } = useQuery({
+  const { data: unitData, isLoading: unitsLoading } = useQuery({
     queryKey: ["/api/units"],
     queryFn: getQueryFn({ on401: "throw" }),
   });
@@ -80,6 +81,7 @@ export default function Trainings() {
       return true;
     });
   }, [events, filter]);
+  const isPageLoading = trainingsLoading || unitsLoading;
 
   useEffect(() => {
     if (!form.ownerUnitId && units.length > 0) {
@@ -145,7 +147,12 @@ export default function Trainings() {
   const handleSubmit = async (eventId: string) => {
     await apiRequest("POST", `/api/training-events/${eventId}/submit`);
     queryClient.invalidateQueries({ queryKey: ["/api/training-events"] });
+    queryClient.invalidateQueries({ queryKey: ["/api/approvals"] });
   };
+
+  if (isPageLoading) {
+    return <LoadingState label="Loading training events..." className="min-h-[420px]" />;
+  }
 
   return (
     <div className="space-y-6">

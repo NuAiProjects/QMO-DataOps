@@ -26,6 +26,8 @@ import {
 import { Download } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { getQueryFn } from "@/lib/queryClient";
+import { LoadingState } from "@/components/ui/loading-state";
+import { Spinner } from "@/components/ui/spinner";
 
 type ReportFilters = {
   from: string;
@@ -94,21 +96,33 @@ export default function Reports() {
     setCompliancePage(1);
   }, [baseQuery]);
 
-  const { data: unitData } = useQuery({
+  const { data: unitData, isLoading: unitsLoading } = useQuery({
     queryKey: ["/api/units"],
     queryFn: getQueryFn({ on401: "throw" }),
   });
   const units = unitData?.units ?? [];
 
-  const { data: hoursByEmployee } = useQuery<ReportResponse<any>>({
+  const {
+    data: hoursByEmployee,
+    isLoading: hoursByEmployeeLoading,
+    isFetching: hoursByEmployeeFetching,
+  } = useQuery<ReportResponse<any>>({
     queryKey: ["/api/reports/hours-by-employee", employeeQuery],
     queryFn: () => fetchReport("/api/reports/hours-by-employee", employeeQuery),
   });
-  const { data: hoursByUnit } = useQuery<ReportResponse<any>>({
+  const {
+    data: hoursByUnit,
+    isLoading: hoursByUnitLoading,
+    isFetching: hoursByUnitFetching,
+  } = useQuery<ReportResponse<any>>({
     queryKey: ["/api/reports/hours-by-unit", unitQuery],
     queryFn: () => fetchReport("/api/reports/hours-by-unit", unitQuery),
   });
-  const { data: compliance } = useQuery<ReportResponse<any>>({
+  const {
+    data: compliance,
+    isLoading: complianceLoading,
+    isFetching: complianceFetching,
+  } = useQuery<ReportResponse<any>>({
     queryKey: ["/api/reports/compliance", complianceQuery],
     queryFn: () => fetchReport("/api/reports/compliance", complianceQuery),
   });
@@ -128,12 +142,27 @@ export default function Reports() {
     return `Showing ${start}-${end} of ${pagination.total}`;
   };
 
+  const isPageLoading =
+    unitsLoading || hoursByEmployeeLoading || hoursByUnitLoading || complianceLoading;
+  const isRefreshing =
+    hoursByEmployeeFetching || hoursByUnitFetching || complianceFetching;
+
+  if (isPageLoading) {
+    return <LoadingState label="Loading reports..." className="min-h-[520px]" />;
+  }
+
   return (
     <div className="space-y-8">
-      <div>
+      <div className="flex items-center justify-between gap-3">
         <h1 className="text-2xl font-display font-bold">Reports & Analytics</h1>
-        <p className="text-muted-foreground">Generate institutional reports and export data.</p>
+        {isRefreshing ? (
+          <div className="flex items-center gap-2 text-sm text-muted-foreground">
+            <Spinner className="h-4 w-4" />
+            Refreshing...
+          </div>
+        ) : null}
       </div>
+      <p className="text-muted-foreground">Generate institutional reports and export data.</p>
 
       <Card className="border-border/60">
         <CardHeader>

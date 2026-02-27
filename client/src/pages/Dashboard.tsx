@@ -1,6 +1,7 @@
 import { useMemo } from "react";
 import { useUser } from "@/hooks/use-user";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { LoadingState } from "@/components/ui/loading-state";
 import { Users, Calendar, CheckCircle2, AlertCircle, FileBarChart, TrendingUp } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { getQueryFn } from "@/lib/queryClient";
@@ -86,30 +87,30 @@ function parseYearMonth(value: string) {
 export default function Dashboard() {
   const { user } = useUser();
 
-  const { data: employeesData } = useQuery<EmployeesResponse>({
+  const { data: employeesData, isLoading: employeesLoading } = useQuery<EmployeesResponse>({
     queryKey: ["/api/employees"],
     queryFn: getQueryFn({ on401: "throw" }),
   });
-  const { data: trainingsData } = useQuery<TrainingsResponse>({
+  const { data: trainingsData, isLoading: trainingsLoading } = useQuery<TrainingsResponse>({
     queryKey: ["/api/training-events"],
     queryFn: getQueryFn({ on401: "throw" }),
   });
-  const { data: attendanceData } = useQuery<AttendanceResponse>({
+  const { data: attendanceData, isLoading: attendanceLoading } = useQuery<AttendanceResponse>({
     queryKey: ["/api/attendance"],
     queryFn: getQueryFn({ on401: "throw" }),
   });
-  const { data: activityData } = useQuery<{ activities: DashboardActivity[] }>({
+  const { data: activityData, isLoading: activityLoading } = useQuery<{ activities: DashboardActivity[] }>({
     queryKey: ["/api/dashboard/activities", "dashboard", "8"],
     queryFn: () => fetchJson<{ activities: DashboardActivity[] }>("/api/dashboard/activities?limit=8"),
   });
 
   const canApprove = user?.role === "super_admin" || user?.role === "hr_qa_approver";
-  const { data: approvalsData } = useQuery<ApprovalsResponse>({
+  const { data: approvalsData, isLoading: approvalsLoading } = useQuery<ApprovalsResponse>({
     queryKey: ["/api/approvals"],
     queryFn: getQueryFn({ on401: "throw" }),
     enabled: !!user && canApprove,
   });
-  const { data: complianceData } = useQuery<ComplianceResponse>({
+  const { data: complianceData, isLoading: complianceLoading } = useQuery<ComplianceResponse>({
     queryKey: ["/api/reports/compliance", ""],
     queryFn: () => fetchJson<ComplianceResponse>("/api/reports/compliance"),
   });
@@ -197,6 +198,18 @@ export default function Dashboard() {
       bg: "bg-emerald-50 dark:bg-emerald-900/20",
     },
   ];
+
+  const isPageLoading =
+    employeesLoading ||
+    trainingsLoading ||
+    attendanceLoading ||
+    activityLoading ||
+    complianceLoading ||
+    (canApprove && approvalsLoading);
+
+  if (isPageLoading) {
+    return <LoadingState label="Loading dashboard data..." className="min-h-[520px]" />;
+  }
 
   return (
     <div className="space-y-8">

@@ -12,6 +12,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { CheckCircle2, XCircle, FileText, Lock, RotateCcw } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { apiRequest, getQueryFn, queryClient } from "@/lib/queryClient";
+import { LoadingState } from "@/components/ui/loading-state";
 
 type ApprovalState = "submitted" | "approved" | "locked";
 
@@ -70,19 +71,20 @@ const typeBadgeClassByType: Record<ApprovalItem["type"], string> = {
 };
 
 export default function Approvals() {
-  const { data } = useQuery<any>({
+  const { data, isLoading: approvalsLoading } = useQuery<any>({
     queryKey: ["/api/approvals"],
     queryFn: getQueryFn({ on401: "throw" }),
+    refetchOnMount: "always",
   });
-  const { data: trainingEventsData } = useQuery<any>({
+  const { data: trainingEventsData, isLoading: trainingsLoading } = useQuery<any>({
     queryKey: ["/api/training-events"],
     queryFn: getQueryFn({ on401: "throw" }),
   });
-  const { data: employeesData } = useQuery<any>({
+  const { data: employeesData, isLoading: employeesLoading } = useQuery<any>({
     queryKey: ["/api/employees"],
     queryFn: getQueryFn({ on401: "throw" }),
   });
-  const { data: unitsData } = useQuery<any>({
+  const { data: unitsData, isLoading: unitsLoading } = useQuery<any>({
     queryKey: ["/api/units"],
     queryFn: getQueryFn({ on401: "throw" }),
   });
@@ -170,6 +172,11 @@ export default function Approvals() {
     ...training.locked.map((event: any) => mapTrainingItem(event, "locked")),
     ...attendance.locked.map((record: any) => mapAttendanceItem(record, "locked")),
   ];
+  const isPageLoading = approvalsLoading || trainingsLoading || employeesLoading || unitsLoading;
+
+  if (isPageLoading) {
+    return <LoadingState label="Loading approvals..." className="min-h-[420px]" />;
+  }
 
   const handleApprove = async (item: ApprovalItem) => {
     if (item.type === "training") {

@@ -12,13 +12,14 @@ import Attendance from "@/pages/Attendance";
 import Approvals from "@/pages/Approvals";
 import Reports from "@/pages/Reports";
 import DashboardLayout from "@/components/layout/DashboardLayout";
+import { FullScreenLoader } from "@/components/ui/loading-state";
 import { useUser } from "@/hooks/use-user";
 
 function ProtectedRoute({ component: Component }: { component: React.ComponentType }) {
   const { user, isLoading } = useUser();
 
   if (isLoading) {
-    return null;
+    return <FullScreenLoader label="Loading your workspace..." />;
   }
 
   if (!user) {
@@ -39,7 +40,7 @@ function Router() {
     <Switch>
       <Route path="/">
         {() => {
-          if (isLoading) return null;
+          if (isLoading) return <FullScreenLoader label="Checking your session..." />;
           return user ? <Redirect to="/dashboard" /> : <Redirect to="/login" />;
         }}
       </Route>

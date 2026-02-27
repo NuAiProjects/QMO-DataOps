@@ -1,10 +1,12 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useUser } from "@/hooks/use-user";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest, getQueryFn, queryClient } from "@/lib/queryClient";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { LoadingState } from "@/components/ui/loading-state";
+import { Spinner } from "@/components/ui/spinner";
 import {
   Table,
   TableBody,
@@ -130,17 +132,19 @@ function csvEscape(value: string | null | undefined) {
   return str;
 }
 
+const EMPLOYEE_PAGE_SIZE = 50;
+
 export default function Employees() {
   const { user } = useUser();
   const { toast } = useToast();
   const [searchTerm, setSearchTerm] = useState("");
   const [statusFilter, setStatusFilter] = useState<"all" | EmployeeStatus>("all");
   const [unitFilter, setUnitFilter] = useState<string>("all");
+  const [currentPage, setCurrentPage] = useState(1);
   const [selectedEmployee, setSelectedEmployee] = useState<Employee | null>(null);
 
   const [isCreateDialogOpen, setIsCreateDialogOpen] = useState(false);
   const [isProfileDialogOpen, setIsProfileDialogOpen] = useState(false);
-  const [isHistoryDialogOpen, setIsHistoryDialogOpen] = useState(false);
   const [isEditDialogOpen, setIsEditDialogOpen] = useState(false);
   const [isBulkUploading, setIsBulkUploading] = useState(false);
   const employeeCsvInputRef = useRef<HTMLInputElement | null>(null);
@@ -160,15 +164,15 @@ export default function Employees() {
     employmentStatus: "active",
   });
 
-  const { data: employeeData } = useQuery<EmployeesResponse>({
+  const { data: employeeData, isLoading: employeesLoading } = useQuery<EmployeesResponse>({
     queryKey: ["/api/employees"],
     queryFn: getQueryFn({ on401: "throw" }),
   });
-  const { data: unitData } = useQuery<UnitsResponse>({
+  const { data: unitData, isLoading: unitsLoading } = useQuery<UnitsResponse>({
     queryKey: ["/api/units"],
     queryFn: getQueryFn({ on401: "throw" }),
   });
-  const { data: trainingData } = useQuery<TrainingsResponse>({
+  const { data: trainingData, isLoading: trainingsLoading } = useQuery<TrainingsResponse>({
     queryKey: ["/api/training-events"],
     queryFn: getQueryFn({ on401: "throw" }),
   });
@@ -177,7 +181,7 @@ export default function Employees() {
   const { data: historyData, isLoading: historyLoading } = useQuery<AttendanceResponse>({
     queryKey: ["/api/attendance", "employee", selectedEmployeeId],
     queryFn: () => fetchJson<AttendanceResponse>(`/api/attendance?employeeId=${selectedEmployeeId}`),
-    enabled: isHistoryDialogOpen && selectedEmployeeId.length > 0,
+    enabled: isProfileDialogOpen && selectedEmployeeId.length > 0,
   });
 
   const employees = employeeData?.employees ?? [];
@@ -187,6 +191,7 @@ export default function Employees() {
 
   const canEdit =
     user?.role === "super_admin" ||
+    user?.role === "hr_qa_approver" ||
     user?.role === "unit_head" ||
     user?.role === "encoder";
 
@@ -230,9 +235,30 @@ export default function Employees() {
     });
   }, [employees, searchTerm, statusFilter, unitFilter, unitMap]);
 
+  const totalPages = Math.max(1, Math.ceil(filteredEmployees.length / EMPLOYEE_PAGE_SIZE));
+  const pageStartIndex = (currentPage - 1) * EMPLOYEE_PAGE_SIZE;
+  const paginatedEmployees = useMemo(() => {
+    return filteredEmployees.slice(pageStartIndex, pageStartIndex + EMPLOYEE_PAGE_SIZE);
+  }, [filteredEmployees, pageStartIndex]);
+
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [searchTerm, statusFilter, unitFilter]);
+
+  useEffect(() => {
+    setCurrentPage((prev) => Math.min(prev, totalPages));
+  }, [totalPages]);
+
   const historyRowsWithTitle = useMemo(() => {
     return [...historyRows].sort((a, b) => b.attendanceDate.localeCompare(a.attendanceDate));
   }, [historyRows]);
+
+  const pageStartLabel = filteredEmployees.length === 0 ? 0 : pageStartIndex + 1;
+  const pageEndLabel =
+    filteredEmployees.length === 0
+      ? 0
+      : Math.min(pageStartIndex + paginatedEmployees.length, filteredEmployees.length);
+  const isPageLoading = employeesLoading || unitsLoading || trainingsLoading;
 
   const hasActiveFilters = statusFilter !== "all" || unitFilter !== "all";
 
@@ -288,11 +314,6 @@ export default function Employees() {
   const openProfileDialog = (employee: Employee) => {
     setSelectedEmployee(employee);
     setIsProfileDialogOpen(true);
-  };
-
-  const openHistoryDialog = (employee: Employee) => {
-    setSelectedEmployee(employee);
-    setIsHistoryDialogOpen(true);
   };
 
   const openEditDialog = (employee: Employee) => {
@@ -481,6 +502,10 @@ export default function Employees() {
     }
   };
 
+  if (isPageLoading) {
+    return <LoadingState label="Loading employee records..." className="min-h-[420px]" />;
+  }
+
   return (
     <div className="space-y-6">
       <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
@@ -498,8 +523,17 @@ export default function Employees() {
               onClick={() => employeeCsvInputRef.current?.click()}
               disabled={isBulkUploading}
             >
-              <Upload className="mr-2 h-4 w-4" />
-              Bulk Upload CSV
+              {isBulkUploading ? (
+                <>
+                  <Spinner className="mr-2 h-4 w-4" />
+                  Uploading...
+                </>
+              ) : (
+                <>
+                  <Upload className="mr-2 h-4 w-4" />
+                  Bulk Upload CSV
+                </>
+              )}
             </Button>
             <input
               ref={employeeCsvInputRef}
@@ -678,7 +712,7 @@ export default function Employees() {
                 </TableCell>
               </TableRow>
             ) : (
-              filteredEmployees.map((employee) => (
+              paginatedEmployees.map((employee) => (
                 <TableRow key={employee.id}>
                   <TableCell>
                     <div className="flex flex-col">
@@ -713,9 +747,6 @@ export default function Employees() {
                         <DropdownMenuItem onSelect={() => openProfileDialog(employee)}>
                           View Profile
                         </DropdownMenuItem>
-                        <DropdownMenuItem onSelect={() => openHistoryDialog(employee)}>
-                          View Training History
-                        </DropdownMenuItem>
                         {canEdit ? (
                           <>
                             <DropdownMenuItem onSelect={() => openEditDialog(employee)}>
@@ -737,37 +768,113 @@ export default function Employees() {
             )}
           </TableBody>
         </Table>
+        <div className="flex flex-col gap-3 border-t px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+          <span className="text-sm text-muted-foreground">
+            Showing {pageStartLabel}-{pageEndLabel} of {filteredEmployees.length} employees
+          </span>
+          <div className="flex items-center gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setCurrentPage((prev) => Math.max(1, prev - 1))}
+              disabled={currentPage <= 1}
+            >
+              Previous
+            </Button>
+            <span className="text-sm text-muted-foreground">
+              Page {currentPage} of {totalPages}
+            </span>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setCurrentPage((prev) => Math.min(totalPages, prev + 1))}
+              disabled={currentPage >= totalPages}
+            >
+              Next
+            </Button>
+          </div>
+        </div>
       </div>
 
       <Dialog open={isProfileDialogOpen} onOpenChange={setIsProfileDialogOpen}>
-        <DialogContent>
+        <DialogContent className="max-w-6xl w-[95vw] max-h-[90vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>Employee Profile</DialogTitle>
-            <DialogDescription>View employee details and current status.</DialogDescription>
+            <DialogDescription>
+              Full profile details and training history.
+            </DialogDescription>
           </DialogHeader>
           {selectedEmployee ? (
-            <div className="space-y-3 text-sm">
-              <div className="grid grid-cols-[140px_1fr] gap-2">
-                <span className="text-muted-foreground">Full Name</span>
-                <span className="font-medium">{selectedEmployee.fullName}</span>
+            <div className="space-y-6">
+              <div className="rounded-md border p-4 space-y-4">
+                <h3 className="text-base font-semibold">Profile Details</h3>
+                <div className="grid gap-3 text-sm sm:grid-cols-2">
+                  <div className="space-y-1">
+                    <p className="text-xs uppercase tracking-wide text-muted-foreground">Full Name</p>
+                    <p className="font-medium">{selectedEmployee.fullName}</p>
+                  </div>
+                  <div className="space-y-1">
+                    <p className="text-xs uppercase tracking-wide text-muted-foreground">Email</p>
+                    <p>{selectedEmployee.email || "-"}</p>
+                  </div>
+                  <div className="space-y-1">
+                    <p className="text-xs uppercase tracking-wide text-muted-foreground">Department</p>
+                    <p>{unitMap.get(selectedEmployee.unitId) || "-"}</p>
+                  </div>
+                  <div className="space-y-1">
+                    <p className="text-xs uppercase tracking-wide text-muted-foreground">Position</p>
+                    <p>{selectedEmployee.position || "-"}</p>
+                  </div>
+                  <div className="space-y-1">
+                    <p className="text-xs uppercase tracking-wide text-muted-foreground">Employment Status</p>
+                    <p className="font-medium">
+                      {selectedEmployee.employmentStatus === "active" ? "Active" : "Inactive"}
+                    </p>
+                  </div>
+                </div>
               </div>
-              <div className="grid grid-cols-[140px_1fr] gap-2">
-                <span className="text-muted-foreground">Email</span>
-                <span>{selectedEmployee.email || "-"}</span>
-              </div>
-              <div className="grid grid-cols-[140px_1fr] gap-2">
-                <span className="text-muted-foreground">Department</span>
-                <span>{unitMap.get(selectedEmployee.unitId) || "-"}</span>
-              </div>
-              <div className="grid grid-cols-[140px_1fr] gap-2">
-                <span className="text-muted-foreground">Position</span>
-                <span>{selectedEmployee.position || "-"}</span>
-              </div>
-              <div className="grid grid-cols-[140px_1fr] gap-2">
-                <span className="text-muted-foreground">Status</span>
-                <span className="font-medium">
-                  {selectedEmployee.employmentStatus === "active" ? "Active" : "Inactive"}
-                </span>
+
+              <div className="rounded-md border p-4 space-y-4">
+                <h3 className="text-base font-semibold">Training History</h3>
+                {historyLoading ? (
+                  <div className="flex items-center gap-2 py-6 text-sm text-muted-foreground">
+                    <Spinner className="h-4 w-4" />
+                    Loading history...
+                  </div>
+                ) : historyRowsWithTitle.length === 0 ? (
+                  <div className="py-6 text-sm text-muted-foreground">No training history available.</div>
+                ) : (
+                  <div className="rounded-md border max-h-[380px] overflow-y-auto">
+                    <Table>
+                      <TableHeader>
+                        <TableRow>
+                          <TableHead>Date</TableHead>
+                          <TableHead>Training</TableHead>
+                          <TableHead>Hours</TableHead>
+                          <TableHead>Attendance</TableHead>
+                          <TableHead>Workflow</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {historyRowsWithTitle.map((row) => (
+                          <TableRow key={row.id}>
+                            <TableCell>{row.attendanceDate}</TableCell>
+                            <TableCell>
+                              {trainingTitleMap.get(row.trainingEventId) || "Unknown Event"}
+                            </TableCell>
+                            <TableCell>{row.hoursCredited}</TableCell>
+                            <TableCell className="capitalize">{row.attendanceStatus}</TableCell>
+                            <TableCell>
+                              <Badge variant="outline" className="capitalize">
+                                {row.workflowStatus}
+                              </Badge>
+                            </TableCell>
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                  </div>
+                )}
               </div>
             </div>
           ) : null}
@@ -775,114 +882,87 @@ export default function Employees() {
       </Dialog>
 
       <Dialog open={isEditDialogOpen} onOpenChange={setIsEditDialogOpen}>
-        <DialogContent>
+        <DialogContent className="max-w-6xl w-[95vw] max-h-[90vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>Edit Employee</DialogTitle>
-            <DialogDescription>Update employee details and status.</DialogDescription>
-          </DialogHeader>
-          <div className="space-y-3">
-            <Input
-              placeholder="Full Name"
-              value={editForm.fullName}
-              onChange={(e) =>
-                setEditForm((prev) => ({ ...prev, fullName: e.target.value }))
-              }
-            />
-            <Input
-              placeholder="Email"
-              value={editForm.email}
-              onChange={(e) =>
-                setEditForm((prev) => ({ ...prev, email: e.target.value }))
-              }
-            />
-            <Input
-              placeholder="Position (optional)"
-              value={editForm.position}
-              onChange={(e) =>
-                setEditForm((prev) => ({ ...prev, position: e.target.value }))
-              }
-            />
-            <Select
-              value={editForm.unitId}
-              onValueChange={(value) =>
-                setEditForm((prev) => ({ ...prev, unitId: value }))
-              }
-            >
-              <SelectTrigger>
-                <SelectValue placeholder="Select department" />
-              </SelectTrigger>
-              <SelectContent>
-                {units.map((unit) => (
-                  <SelectItem key={unit.id} value={unit.id}>
-                    {unit.name}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            <Select
-              value={editForm.employmentStatus}
-              onValueChange={(value: EmployeeStatus) =>
-                setEditForm((prev) => ({ ...prev, employmentStatus: value }))
-              }
-            >
-              <SelectTrigger>
-                <SelectValue placeholder="Status" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="active">Active</SelectItem>
-                <SelectItem value="inactive">Inactive</SelectItem>
-              </SelectContent>
-            </Select>
-            <Button onClick={handleEditSave}>Save Changes</Button>
-          </div>
-        </DialogContent>
-      </Dialog>
-
-      <Dialog open={isHistoryDialogOpen} onOpenChange={setIsHistoryDialogOpen}>
-        <DialogContent className="max-w-4xl">
-          <DialogHeader>
-            <DialogTitle>
-              Training History{selectedEmployee ? `: ${selectedEmployee.fullName}` : ""}
-            </DialogTitle>
             <DialogDescription>
-              Attendance records for this employee.
+              Update full employee profile details and save changes.
             </DialogDescription>
           </DialogHeader>
-
-          {historyLoading ? (
-            <div className="py-6 text-sm text-muted-foreground">Loading history...</div>
-          ) : historyRowsWithTitle.length === 0 ? (
-            <div className="py-6 text-sm text-muted-foreground">No training history available.</div>
-          ) : (
-            <div className="rounded-md border max-h-[420px] overflow-y-auto">
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>Date</TableHead>
-                    <TableHead>Training</TableHead>
-                    <TableHead>Hours</TableHead>
-                    <TableHead>Attendance</TableHead>
-                    <TableHead>Workflow</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {historyRowsWithTitle.map((row) => (
-                    <TableRow key={row.id}>
-                      <TableCell>{row.attendanceDate}</TableCell>
-                      <TableCell>{trainingTitleMap.get(row.trainingEventId) || "Unknown Event"}</TableCell>
-                      <TableCell>{row.hoursCredited}</TableCell>
-                      <TableCell className="capitalize">{row.attendanceStatus}</TableCell>
-                      <TableCell>
-                        <Badge variant="outline" className="capitalize">
-                          {row.workflowStatus}
-                        </Badge>
-                      </TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
+          <div className="space-y-6">
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div className="space-y-2">
+                <label className="text-sm font-medium text-foreground">Full Name</label>
+                <Input
+                  placeholder="Full Name"
+                  value={editForm.fullName}
+                  onChange={(e) =>
+                    setEditForm((prev) => ({ ...prev, fullName: e.target.value }))
+                  }
+                />
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm font-medium text-foreground">Email</label>
+                <Input
+                  placeholder="Email"
+                  value={editForm.email}
+                  onChange={(e) =>
+                    setEditForm((prev) => ({ ...prev, email: e.target.value }))
+                  }
+                />
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm font-medium text-foreground">Department</label>
+                <Select
+                  value={editForm.unitId}
+                  onValueChange={(value) =>
+                    setEditForm((prev) => ({ ...prev, unitId: value }))
+                  }
+                >
+                  <SelectTrigger>
+                    <SelectValue placeholder="Select department" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {units.map((unit) => (
+                      <SelectItem key={unit.id} value={unit.id}>
+                        {unit.name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm font-medium text-foreground">Position</label>
+                <Input
+                  placeholder="Position (optional)"
+                  value={editForm.position}
+                  onChange={(e) =>
+                    setEditForm((prev) => ({ ...prev, position: e.target.value }))
+                  }
+                />
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm font-medium text-foreground">Employment Status</label>
+                <Select
+                  value={editForm.employmentStatus}
+                  onValueChange={(value: EmployeeStatus) =>
+                    setEditForm((prev) => ({ ...prev, employmentStatus: value }))
+                  }
+                >
+                  <SelectTrigger>
+                    <SelectValue placeholder="Status" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="active">Active</SelectItem>
+                    <SelectItem value="inactive">Inactive</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
             </div>
-          )}
+            <div className="flex justify-end border-t pt-4">
+              <Button onClick={handleEditSave}>Save Changes</Button>
+            </div>
+          </div>
         </DialogContent>
       </Dialog>
     </div>

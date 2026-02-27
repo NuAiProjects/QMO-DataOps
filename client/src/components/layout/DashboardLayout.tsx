@@ -28,6 +28,7 @@ import {
 import { Sheet, SheetContent, SheetTrigger } from "@/components/ui/sheet";
 import logo from "@/assets/NUlogo-Dark.png";
 import { Input } from "@/components/ui/input";
+import { Spinner } from "@/components/ui/spinner";
 import { useQuery } from "@tanstack/react-query";
 import { getQueryFn } from "@/lib/queryClient";
 
@@ -137,7 +138,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
       label: "Attendance",
       href: "/attendance",
       icon: ClipboardCheck,
-      roles: ["super_admin", "unit_head", "encoder", "viewer_auditor"],
+      roles: ["super_admin", "hr_qa_approver", "unit_head", "encoder", "viewer_auditor"],
     },
     {
       label: "Approvals",
@@ -149,7 +150,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
       label: "Reports",
       href: "/reports",
       icon: FileText,
-      roles: ["super_admin", "hr_qa_approver", "viewer_auditor"],
+      roles: ["super_admin", "hr_qa_approver", "unit_head", "encoder", "viewer_auditor"],
     },
   ];
 
@@ -282,7 +283,10 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
               {searchOpen && debouncedSearch.length >= 2 ? (
                 <div className="absolute top-11 z-50 w-full rounded-md border border-border bg-card shadow-md">
                   {isSearching ? (
-                    <div className="px-3 py-2 text-sm text-muted-foreground">Searching...</div>
+                    <div className="flex items-center gap-2 px-3 py-2 text-sm text-muted-foreground">
+                      <Spinner className="h-4 w-4" />
+                      Searching...
+                    </div>
                   ) : searchResults.length === 0 ? (
                     <div className="px-3 py-2 text-sm text-muted-foreground">No results found.</div>
                   ) : (

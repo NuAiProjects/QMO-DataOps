@@ -309,6 +309,30 @@ async function isEntityInScope(
   return !!employeeRow && scopeUnitIds.includes(employeeRow.unitId);
 }
 
+async function canUserViewAuditLog(
+  row: typeof auditLogs.$inferSelect,
+  user: Express.User,
+  scopeUnitIds: string[],
+) {
+  if (user.role === "super_admin" || user.role === "hr_qa_approver") {
+    return true;
+  }
+  if (row.actorUserId && row.actorUserId === user.id) {
+    return true;
+  }
+  if (!row.entityId) {
+    return false;
+  }
+  if (
+    row.entityType === "attendance_record" ||
+    row.entityType === "training_event" ||
+    row.entityType === "employee"
+  ) {
+    return isEntityInScope(row.entityType, row.entityId, scopeUnitIds);
+  }
+  return false;
+}
+
 async function getDescendantUnits(
   rootUnitId: string,
   scopeUnitIds: string[],
@@ -470,7 +494,16 @@ export async function registerRoutes(
     res.json({ unit: updated });
   });
 
-  api.get("/users", requireRole(["super_admin"]), async (_req, res) => {
+  api.get(
+    "/users",
+    requireRole([
+      "super_admin",
+      "hr_qa_approver",
+      "unit_head",
+      "encoder",
+      "viewer_auditor",
+    ]),
+    async (req, res) => {
     const rows = await db.select().from(users).orderBy(asc(users.fullName));
     const userUnitRows = await db.select().from(userUnits);
     const unitMap = userUnitRows.reduce<Record<string, string[]>>((acc, row) => {
@@ -478,10 +511,31 @@ export async function registerRoutes(
       acc[row.userId].push(row.unitId);
       return acc;
     }, {});
-    res.json({
-      users: rows.map((user) => ({ ...user, unitIds: unitMap[user.id] || [] })),
-    });
-  });
+      if (req.user!.role === "super_admin" || req.user!.role === "hr_qa_approver") {
+        return res.json({
+          users: rows.map((user) => ({ ...user, unitIds: unitMap[user.id] || [] })),
+        });
+      }
+
+      const scopeUnitIds = await getScopedUnitIds(req.user!);
+      const scopedRows = rows.filter((user) => {
+        if (user.id === req.user!.id) return true;
+        const assignedUnits = unitMap[user.id] || [];
+        return assignedUnits.some((unitId) => scopeUnitIds.includes(unitId));
+      });
+
+      res.json({
+        users: scopedRows.map((user) => ({
+          id: user.id,
+          email: user.email,
+          fullName: user.fullName,
+          role: user.role,
+          isActive: user.isActive,
+          unitIds: unitMap[user.id] || [],
+        })),
+      });
+    },
+  );
 
   api.post("/users", requireRole(["super_admin"]), async (req, res) => {
     const parsed = userInputSchema.safeParse(req.body);
@@ -602,7 +656,7 @@ export async function registerRoutes(
 
   api.post(
     "/employees",
-    requireAnyRoleOrSuperAdmin(["encoder", "unit_head"]),
+    requireAnyRoleOrSuperAdmin(["encoder", "unit_head", "hr_qa_approver"]),
     async (req, res) => {
       const parsed = employeeInputSchema.safeParse(req.body);
       if (!parsed.success) {
@@ -644,7 +698,7 @@ export async function registerRoutes(
 
   api.post(
     "/employees/import",
-    requireAnyRoleOrSuperAdmin(["encoder", "unit_head"]),
+    requireAnyRoleOrSuperAdmin(["encoder", "unit_head", "hr_qa_approver"]),
     csvUpload.single("file"),
     async (req, res) => {
       if (!req.file) {
@@ -1051,7 +1105,7 @@ export async function registerRoutes(
 
   api.put(
     "/employees/:id",
-    requireAnyRoleOrSuperAdmin(["encoder", "unit_head"]),
+    requireAnyRoleOrSuperAdmin(["encoder", "unit_head", "hr_qa_approver"]),
     async (req, res) => {
       const parsed = employeeInputSchema.partial().safeParse(req.body);
       if (!parsed.success) {
@@ -1157,7 +1211,7 @@ export async function registerRoutes(
 
   api.post(
     "/training-events",
-    requireAnyRoleOrSuperAdmin(["encoder", "unit_head"]),
+    requireAnyRoleOrSuperAdmin(["encoder", "unit_head", "hr_qa_approver"]),
     async (req, res) => {
       const parsed = trainingEventInputSchema.safeParse(req.body);
       if (!parsed.success) {
@@ -1192,7 +1246,7 @@ export async function registerRoutes(
 
   api.put(
     "/training-events/:id",
-    requireAnyRoleOrSuperAdmin(["encoder", "unit_head"]),
+    requireAnyRoleOrSuperAdmin(["encoder", "unit_head", "hr_qa_approver"]),
     async (req, res) => {
       const parsed = trainingEventInputSchema.partial().safeParse(req.body);
       if (!parsed.success) {
@@ -1538,7 +1592,7 @@ export async function registerRoutes(
 
   api.post(
     "/attendance",
-    requireAnyRoleOrSuperAdmin(["encoder", "unit_head"]),
+    requireAnyRoleOrSuperAdmin(["encoder", "unit_head", "hr_qa_approver"]),
     async (req, res) => {
       const parsed = attendanceInputSchema.safeParse(req.body);
       if (!parsed.success) {
@@ -1611,7 +1665,7 @@ export async function registerRoutes(
 
   api.put(
     "/attendance/:id",
-    requireAnyRoleOrSuperAdmin(["encoder", "unit_head"]),
+    requireAnyRoleOrSuperAdmin(["encoder", "unit_head", "hr_qa_approver"]),
     async (req, res) => {
       const parsed = attendanceInputSchema.partial().safeParse(req.body);
       if (!parsed.success) {
@@ -1954,6 +2008,7 @@ export async function registerRoutes(
       if (!scopeUnitIds.includes(trainingEvent.ownerUnitId)) {
         return res.status(403).json({ message: "Unit out of scope." });
       }
+      const selectedEventTitleKey = normalizeCsvText(trainingEvent.title);
       const rawCsv = req.file.buffer.toString("utf-8");
       let parsedHeaders: string[] = [];
       let records: Record<string, string>[] = [];
@@ -2030,6 +2085,17 @@ export async function registerRoutes(
             employeeNo: emailValue || participantsValue || "unknown",
             matchStatus: "invalid",
             errorMessage: "Missing required values for Title or Date.",
+          });
+          invalid += 1;
+          continue;
+        }
+        const csvTitleKey = normalizeCsvText(titleValue);
+        if (csvTitleKey !== selectedEventTitleKey) {
+          rowsToInsert.push({
+            rawRowJson: row,
+            employeeNo: emailValue || participantsValue || "unknown",
+            matchStatus: "invalid",
+            errorMessage: `Title does not match selected event (${trainingEvent.title}).`,
           });
           invalid += 1;
           continue;
@@ -2152,7 +2218,7 @@ export async function registerRoutes(
 
   api.post(
     "/attendance/import/:batchId/resolve",
-    requireAnyRoleOrSuperAdmin(["encoder", "unit_head"]),
+    requireAnyRoleOrSuperAdmin(["encoder", "unit_head", "hr_qa_approver"]),
     async (req, res) => {
       const parsed = resolveRowsSchema.safeParse(req.body);
       if (!parsed.success) {
@@ -2209,7 +2275,7 @@ export async function registerRoutes(
 
   api.post(
     "/attendance/import/:batchId/commit",
-    requireAnyRoleOrSuperAdmin(["encoder", "unit_head"]),
+    requireAnyRoleOrSuperAdmin(["encoder", "unit_head", "hr_qa_approver"]),
     async (req, res) => {
       const parsed = commitImportSchema.safeParse(req.body);
       if (!parsed.success) {
@@ -2344,7 +2410,7 @@ export async function registerRoutes(
 
   api.post(
     "/attachments/upload",
-    requireAnyRoleOrSuperAdmin(["encoder", "unit_head"]),
+    requireAnyRoleOrSuperAdmin(["encoder", "unit_head", "hr_qa_approver"]),
     attachmentUpload.single("file"),
     async (req, res) => {
       if (!req.file) {
@@ -3053,7 +3119,13 @@ export async function registerRoutes(
 
   api.get(
     "/audit",
-    requireRole(["super_admin", "hr_qa_approver"]),
+    requireRole([
+      "super_admin",
+      "hr_qa_approver",
+      "unit_head",
+      "encoder",
+      "viewer_auditor",
+    ]),
     async (req, res) => {
       const querySchema = z.object({
         entityType: z.string().optional(),
@@ -3075,7 +3147,24 @@ export async function registerRoutes(
         .from(auditLogs)
         .where(filters.length > 0 ? and(...filters) : undefined)
         .orderBy(desc(auditLogs.createdAt));
-      res.json({ logs: rows });
+
+      if (req.user!.role === "super_admin" || req.user!.role === "hr_qa_approver") {
+        return res.json({ logs: rows });
+      }
+
+      const scopeUnitIds = await getScopedUnitIds(req.user!);
+      const scopedLogs = (
+        await Promise.all(
+          rows.map(async (row) => ({
+            row,
+            allowed: await canUserViewAuditLog(row, req.user!, scopeUnitIds),
+          })),
+        )
+      )
+        .filter((entry) => entry.allowed)
+        .map((entry) => entry.row);
+
+      res.json({ logs: scopedLogs });
     },
   );
 

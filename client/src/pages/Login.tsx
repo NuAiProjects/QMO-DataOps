@@ -3,6 +3,7 @@ import { useUser } from "@/hooks/use-user";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Spinner } from "@/components/ui/spinner";
 import {
   Card,
   CardContent,
@@ -132,7 +133,14 @@ export default function Login() {
                 className="w-full h-11 text-base font-semibold shadow-lg shadow-primary/20 hover:shadow-primary/40 transition-all"
                 disabled={isSubmitting}
               >
-                {isSubmitting ? "Signing in..." : "Sign In"}
+                {isSubmitting ? (
+                  <>
+                    <Spinner className="mr-2 h-4 w-4" />
+                    Signing in...
+                  </>
+                ) : (
+                  "Sign In"
+                )}
               </Button>
             </form>
           </CardContent>

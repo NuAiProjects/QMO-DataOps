@@ -6,6 +6,7 @@ import { createServer } from "http";
 
 const app = express();
 const httpServer = createServer(app);
+app.disable("x-powered-by");
 
 declare module "http" {
   interface IncomingMessage {
@@ -22,6 +23,17 @@ app.use(
 );
 
 app.use(express.urlencoded({ extended: false }));
+
+app.use((req, res, next) => {
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("X-Frame-Options", "DENY");
+  res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
+  res.setHeader("Permissions-Policy", "geolocation=(), microphone=(), camera=()");
+  if (process.env.NODE_ENV === "production" && req.secure) {
+    res.setHeader("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
+  }
+  next();
+});
 
 export function log(message: string, source = "express") {
   const formattedTime = new Date().toLocaleTimeString("en-US", {
