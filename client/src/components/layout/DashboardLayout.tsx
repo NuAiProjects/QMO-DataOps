@@ -152,6 +152,18 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
       icon: FileText,
       roles: ["super_admin", "hr_qa_approver", "unit_head", "encoder", "viewer_auditor"],
     },
+    {
+      label: "Users",
+      href: "/users",
+      icon: Users,
+      roles: ["super_admin", "hr_qa_approver", "unit_head", "encoder", "viewer_auditor"],
+    },
+    {
+      label: "Audit",
+      href: "/audit",
+      icon: File,
+      roles: ["super_admin", "hr_qa_approver", "unit_head", "encoder", "viewer_auditor"],
+    },
   ];
 
   const filteredNav = navItems.filter((item) => item.roles.includes(user.role));

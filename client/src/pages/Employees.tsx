@@ -7,6 +7,8 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { LoadingState } from "@/components/ui/loading-state";
 import { Spinner } from "@/components/ui/spinner";
+import EvidenceManager from "@/components/evidence/EvidenceManager";
+import { Textarea } from "@/components/ui/textarea";
 import {
   Table,
   TableBody,
@@ -147,6 +149,8 @@ export default function Employees() {
   const [isProfileDialogOpen, setIsProfileDialogOpen] = useState(false);
   const [isEditDialogOpen, setIsEditDialogOpen] = useState(false);
   const [isBulkUploading, setIsBulkUploading] = useState(false);
+  const [isArchiveDialogOpen, setIsArchiveDialogOpen] = useState(false);
+  const [archiveReason, setArchiveReason] = useState("");
   const employeeCsvInputRef = useRef<HTMLInputElement | null>(null);
 
   const [createForm, setCreateForm] = useState<EmployeeForm>({
@@ -194,6 +198,8 @@ export default function Employees() {
     user?.role === "hr_qa_approver" ||
     user?.role === "unit_head" ||
     user?.role === "encoder";
+  const canUploadEvidence = canEdit;
+  const canDeleteEvidence = user?.role === "super_admin" || user?.role === "hr_qa_approver";
 
   const unitMap = useMemo(() => {
     const map = new Map<string, string>();
@@ -388,6 +394,27 @@ export default function Employees() {
       toast({
         variant: "destructive",
         title: "Status update failed",
+        description: getErrorMessage(error),
+      });
+    }
+  };
+
+  const handleArchiveEmployee = async () => {
+    if (!selectedEmployee) return;
+    try {
+      await apiRequest("DELETE", `/api/employees/${selectedEmployee.id}`, {
+        reason: archiveReason.trim(),
+      });
+      await queryClient.invalidateQueries({ queryKey: ["/api/employees"] });
+      setIsArchiveDialogOpen(false);
+      setIsProfileDialogOpen(false);
+      setArchiveReason("");
+      setSelectedEmployee(null);
+      toast({ title: "Employee archived successfully." });
+    } catch (error) {
+      toast({
+        variant: "destructive",
+        title: "Failed to archive employee",
         description: getErrorMessage(error),
       });
     }
@@ -758,6 +785,16 @@ export default function Employees() {
                             >
                               {employee.employmentStatus === "active" ? "Deactivate" : "Activate"}
                             </DropdownMenuItem>
+                            <DropdownMenuItem
+                              className="text-destructive"
+                              onSelect={() => {
+                                setSelectedEmployee(employee);
+                                setArchiveReason("");
+                                setIsArchiveDialogOpen(true);
+                              }}
+                            >
+                              Archive (Soft Delete)
+                            </DropdownMenuItem>
                           </>
                         ) : null}
                       </DropdownMenuContent>
@@ -876,8 +913,43 @@ export default function Employees() {
                   </div>
                 )}
               </div>
+
+              <div className="rounded-md border p-4 space-y-3">
+                <h3 className="text-base font-semibold">Evidence Files</h3>
+                <EvidenceManager
+                  entityType="employee"
+                  entityId={selectedEmployee.id}
+                  canUpload={canUploadEvidence}
+                  canDelete={canDeleteEvidence}
+                />
+              </div>
             </div>
           ) : null}
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={isArchiveDialogOpen} onOpenChange={setIsArchiveDialogOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Archive Employee</DialogTitle>
+            <DialogDescription>
+              Provide a reason for archiving {selectedEmployee?.fullName || "this employee"}.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3">
+            <Textarea
+              placeholder="Reason for archive"
+              value={archiveReason}
+              onChange={(event) => setArchiveReason(event.target.value)}
+            />
+            <Button
+              variant="destructive"
+              disabled={archiveReason.trim().length < 3}
+              onClick={handleArchiveEmployee}
+            >
+              Archive Employee
+            </Button>
+          </div>
         </DialogContent>
       </Dialog>
 

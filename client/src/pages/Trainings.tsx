@@ -1,21 +1,15 @@
 import { useEffect, useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { 
-  Card, 
-  CardContent, 
-  CardFooter, 
-  CardHeader, 
+import {
+  Card,
+  CardContent,
+  CardFooter,
+  CardHeader,
   CardTitle,
-  CardDescription
+  CardDescription,
 } from "@/components/ui/card";
-import { 
-  Calendar as CalendarIcon, 
-  Users, 
-  Clock, 
-  MoreVertical,
-  Plus
-} from "lucide-react";
+import { Calendar as CalendarIcon, Users, Clock, MoreVertical, Plus, Copy } from "lucide-react";
 import { useUser } from "@/hooks/use-user";
 import { useQuery } from "@tanstack/react-query";
 import { apiRequest, getQueryFn, queryClient } from "@/lib/queryClient";
@@ -37,28 +31,61 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import EvidenceManager from "@/components/evidence/EvidenceManager";
+import { Textarea } from "@/components/ui/textarea";
+
+type TrainingForm = {
+  title: string;
+  description: string;
+  category: string;
+  deliveryMode: string;
+  provider: string;
+  startDate: string;
+  endDate: string;
+  hours: string;
+  ownerUnitId: string;
+  visibilityScope: string;
+  isMandatory: boolean;
+};
+
+const emptyForm: TrainingForm = {
+  title: "",
+  description: "",
+  category: "",
+  deliveryMode: "in_person",
+  provider: "",
+  startDate: "",
+  endDate: "",
+  hours: "0",
+  ownerUnitId: "",
+  visibilityScope: "unit",
+  isMandatory: false,
+};
 
 export default function Trainings() {
   const { user } = useUser();
   const { toast } = useToast();
   const [filter, setFilter] = useState("All");
   const [isDialogOpen, setIsDialogOpen] = useState(false);
-  const [form, setForm] = useState({
-    title: "",
-    description: "",
-    category: "",
-    deliveryMode: "in_person",
-    provider: "",
-    startDate: "",
-    endDate: "",
-    hours: "0",
-    ownerUnitId: "",
-    visibilityScope: "unit",
-    isMandatory: false,
-  });
+  const [editingEventId, setEditingEventId] = useState<string | null>(null);
+  const [detailsEvent, setDetailsEvent] = useState<any | null>(null);
+  const [archiveDialogOpen, setArchiveDialogOpen] = useState(false);
+  const [archiveTargetEvent, setArchiveTargetEvent] = useState<any | null>(null);
+  const [archiveReason, setArchiveReason] = useState("");
+  const [form, setForm] = useState<TrainingForm>(emptyForm);
 
   const canCreate = user?.role !== "viewer_auditor";
   const canSubmit = ["encoder", "unit_head", "super_admin"].includes(user?.role || "");
+  const canUploadEvidence = ["encoder", "unit_head", "hr_qa_approver", "super_admin"].includes(
+    user?.role || "",
+  );
+  const canDeleteEvidence = ["hr_qa_approver", "super_admin"].includes(user?.role || "");
 
   const { data, isLoading: trainingsLoading } = useQuery({
     queryKey: ["/api/training-events"],
@@ -89,7 +116,48 @@ export default function Trainings() {
     }
   }, [units, form.ownerUnitId]);
 
-  const handleCreate = async () => {
+  const resetForm = () => {
+    setForm(emptyForm);
+    setEditingEventId(null);
+  };
+
+  const mapEventToForm = (event: any): TrainingForm => ({
+    title: event.title || "",
+    description: event.description || "",
+    category: event.category || "",
+    deliveryMode: event.deliveryMode || "in_person",
+    provider: event.provider || "",
+    startDate: event.startDate || "",
+    endDate: event.endDate || "",
+    hours: String(event.hours ?? "0"),
+    ownerUnitId: event.ownerUnitId || "",
+    visibilityScope: event.visibilityScope || "unit",
+    isMandatory: Boolean(event.isMandatory),
+  });
+
+  const openCreateDialog = () => {
+    resetForm();
+    setIsDialogOpen(true);
+  };
+
+  const openEditDialog = (event: any) => {
+    setEditingEventId(event.id);
+    setForm(mapEventToForm(event));
+    setIsDialogOpen(true);
+  };
+
+  const copyAsTemplate = (event: any) => {
+    setEditingEventId(null);
+    setForm({
+      ...mapEventToForm(event),
+      title: `${event.title} (Copy)`,
+      startDate: "",
+      endDate: "",
+    });
+    setIsDialogOpen(true);
+  };
+
+  const handleCreateOrUpdate = async () => {
     const ownerUnitId = form.ownerUnitId || units[0]?.id;
     if (!form.title.trim()) {
       toast({ variant: "destructive", title: "Title is required." });
@@ -110,7 +178,7 @@ export default function Trainings() {
     }
 
     try {
-      await apiRequest("POST", "/api/training-events", {
+      const payload = {
         ...form,
         title: form.title.trim(),
         description: form.description?.trim() || null,
@@ -118,27 +186,25 @@ export default function Trainings() {
         provider: form.provider?.trim() || null,
         hours,
         ownerUnitId,
-      });
+      };
+      if (editingEventId) {
+        await apiRequest("PUT", `/api/training-events/${editingEventId}`, payload);
+      } else {
+        await apiRequest("POST", "/api/training-events", payload);
+      }
       queryClient.invalidateQueries({ queryKey: ["/api/training-events"] });
       setIsDialogOpen(false);
-      setForm({
-        title: "",
-        description: "",
-        category: "",
-        deliveryMode: "in_person",
-        provider: "",
-        startDate: "",
-        endDate: "",
-        hours: "0",
-        ownerUnitId: "",
-        visibilityScope: "unit",
-        isMandatory: false,
-      });
+      resetForm();
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Unable to create event.";
+      const message =
+        error instanceof Error
+          ? error.message
+          : editingEventId
+            ? "Unable to update event."
+            : "Unable to create event.";
       toast({
         variant: "destructive",
-        title: "Failed to create event",
+        title: editingEventId ? "Failed to update event" : "Failed to create event",
         description: message.replace(/^Error:\s*/, ""),
       });
     }
@@ -150,65 +216,89 @@ export default function Trainings() {
     queryClient.invalidateQueries({ queryKey: ["/api/approvals"] });
   };
 
+  const handleArchive = async () => {
+    if (!archiveTargetEvent) return;
+    await apiRequest("DELETE", `/api/training-events/${archiveTargetEvent.id}`, {
+      reason: archiveReason.trim(),
+    });
+    await queryClient.invalidateQueries({ queryKey: ["/api/training-events"] });
+    setArchiveDialogOpen(false);
+    setArchiveTargetEvent(null);
+    setArchiveReason("");
+    if (detailsEvent?.id === archiveTargetEvent.id) {
+      setDetailsEvent(null);
+    }
+  };
+
   if (isPageLoading) {
     return <LoadingState label="Loading training events..." className="min-h-[420px]" />;
   }
 
   return (
     <div className="space-y-6">
-      <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+      <div className="flex flex-col items-start justify-between gap-4 sm:flex-row sm:items-center">
         <div>
           <h1 className="text-2xl font-display font-bold">Training Events</h1>
           <p className="text-muted-foreground">Browse and manage upcoming seminars and workshops.</p>
         </div>
-        {canCreate && (
-          <Dialog open={isDialogOpen} onOpenChange={setIsDialogOpen}>
+        {canCreate ? (
+          <Dialog
+            open={isDialogOpen}
+            onOpenChange={(open) => {
+              setIsDialogOpen(open);
+              if (!open) {
+                resetForm();
+              }
+            }}
+          >
             <DialogTrigger asChild>
-              <Button className="shadow-md">
+              <Button className="shadow-md" onClick={openCreateDialog}>
                 <Plus className="mr-2 h-4 w-4" />
                 Create Event
               </Button>
             </DialogTrigger>
             <DialogContent>
               <DialogHeader>
-                <DialogTitle>New Training Event</DialogTitle>
+                <DialogTitle>{editingEventId ? "Edit Training Event" : "New Training Event"}</DialogTitle>
                 <DialogDescription className="sr-only">
-                  Create a new training event for your unit.
+                  Create or update a training event for your unit.
                 </DialogDescription>
               </DialogHeader>
               <div className="space-y-3">
                 <Input
                   placeholder="Title"
                   value={form.title}
-                  onChange={(e) => setForm((prev) => ({ ...prev, title: e.target.value }))}
+                  onChange={(event) => setForm((prev) => ({ ...prev, title: event.target.value }))}
                 />
                 <Input
                   placeholder="Category"
                   value={form.category}
-                  onChange={(e) => setForm((prev) => ({ ...prev, category: e.target.value }))}
+                  onChange={(event) => setForm((prev) => ({ ...prev, category: event.target.value }))}
                 />
                 <Input
                   placeholder="Provider"
                   value={form.provider}
-                  onChange={(e) => setForm((prev) => ({ ...prev, provider: e.target.value }))}
+                  onChange={(event) => setForm((prev) => ({ ...prev, provider: event.target.value }))}
                 />
                 <div className="grid grid-cols-2 gap-2">
                   <Input
                     type="date"
                     value={form.startDate}
-                    onChange={(e) => setForm((prev) => ({ ...prev, startDate: e.target.value }))}
+                    onChange={(event) =>
+                      setForm((prev) => ({ ...prev, startDate: event.target.value }))
+                    }
                   />
                   <Input
                     type="date"
                     value={form.endDate}
-                    onChange={(e) => setForm((prev) => ({ ...prev, endDate: e.target.value }))}
+                    onChange={(event) => setForm((prev) => ({ ...prev, endDate: event.target.value }))}
                   />
                 </div>
                 <Input
                   placeholder="Hours"
                   type="number"
                   value={form.hours}
-                  onChange={(e) => setForm((prev) => ({ ...prev, hours: e.target.value }))}
+                  onChange={(event) => setForm((prev) => ({ ...prev, hours: event.target.value }))}
                 />
                 <Select
                   value={form.deliveryMode}
@@ -266,79 +356,200 @@ export default function Trainings() {
                     <SelectItem value="no">Optional</SelectItem>
                   </SelectContent>
                 </Select>
-                <Button onClick={handleCreate}>Create Event</Button>
+                <Button onClick={handleCreateOrUpdate}>
+                  {editingEventId ? "Save Changes" : "Create Event"}
+                </Button>
               </div>
             </DialogContent>
           </Dialog>
-        )}
+        ) : null}
       </div>
 
       <div className="flex items-center gap-4 overflow-x-auto pb-2">
-        {["All", "Drafts", "Submitted", "Approved", "Locked"].map((f) => (
+        {["All", "Drafts", "Submitted", "Approved", "Locked"].map((value) => (
           <Button
-            key={f}
-            variant={filter === f ? "default" : "outline"}
-            onClick={() => setFilter(f)}
+            key={value}
+            variant={filter === value ? "default" : "outline"}
+            onClick={() => setFilter(value)}
             className="rounded-full"
             size="sm"
           >
-            {f}
+            {value}
           </Button>
         ))}
       </div>
 
       <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-3">
-        {filtered.map((event: any) => (
-          <Card key={event.id} className="group hover:shadow-lg transition-all border-border/60">
-            <CardHeader>
-              <div className="flex justify-between items-start">
-                <Badge variant="outline" className="mb-2 w-fit bg-primary/5 text-primary border-primary/20">
-                  {event.category || event.deliveryMode}
-                </Badge>
-                <Button variant="ghost" size="icon" className="-mr-2 -mt-2 h-8 w-8 text-muted-foreground">
-                  <MoreVertical className="h-4 w-4" />
-                </Button>
-              </div>
-              <CardTitle className="line-clamp-2 leading-tight h-12">
-                {event.title}
-              </CardTitle>
-              <CardDescription className="flex items-center mt-1">
-                <CalendarIcon className="mr-2 h-3.5 w-3.5" />
-                {new Date(event.startDate).toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" })}
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              <div className="space-y-2 text-sm text-muted-foreground">
-                <div className="flex items-center">
-                  <Clock className="mr-2 h-3.5 w-3.5" />
-                  {event.hours} Hours Credit
-                </div>
-                <div className="flex items-center">
-                  <Users className="mr-2 h-3.5 w-3.5" />
-                  {event.provider || "Internal"}
-                </div>
-              </div>
-            </CardContent>
-            <CardFooter className="pt-2 border-t bg-muted/20">
-              <div className="flex w-full items-center justify-between">
-                <Badge variant="outline">
-                  {event.workflowStatus}
-                </Badge>
-                <div className="flex items-center gap-2">
-                  {canSubmit && (event.workflowStatus === "draft" || event.workflowStatus === "returned") ? (
-                    <Button variant="outline" size="sm" onClick={() => handleSubmit(event.id)}>
-                      Submit
-                    </Button>
+        {filtered.map((event: any) => {
+          const canEdit = event.workflowStatus === "draft" || event.workflowStatus === "returned";
+          return (
+            <Card key={event.id} className="group border-border/60 transition-all hover:shadow-lg">
+              <CardHeader>
+                <div className="flex items-start justify-between">
+                  <Badge variant="outline" className="mb-2 w-fit border-primary/20 bg-primary/5 text-primary">
+                    {event.category || event.deliveryMode}
+                  </Badge>
+                  {canCreate ? (
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild>
+                        <Button variant="ghost" size="icon" className="-mr-2 -mt-2 h-8 w-8 text-muted-foreground">
+                          <MoreVertical className="h-4 w-4" />
+                        </Button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="end">
+                        {canEdit ? (
+                          <DropdownMenuItem onClick={() => openEditDialog(event)}>
+                            Edit Details
+                          </DropdownMenuItem>
+                        ) : null}
+                        <DropdownMenuItem onClick={() => copyAsTemplate(event)}>
+                          <Copy className="mr-2 h-4 w-4" />
+                          Copy as Template
+                        </DropdownMenuItem>
+                        <DropdownMenuItem
+                          className="text-destructive"
+                          onClick={() => {
+                            setArchiveTargetEvent(event);
+                            setArchiveReason("");
+                            setArchiveDialogOpen(true);
+                          }}
+                        >
+                          Archive Event
+                        </DropdownMenuItem>
+                      </DropdownMenuContent>
+                    </DropdownMenu>
                   ) : null}
-                  <Button variant="link" size="sm" className="h-auto p-0">
-                    View Details
-                  </Button>
+                </div>
+                <CardTitle className="h-12 line-clamp-2 leading-tight">{event.title}</CardTitle>
+                <CardDescription className="mt-1 flex items-center">
+                  <CalendarIcon className="mr-2 h-3.5 w-3.5" />
+                  {new Date(event.startDate).toLocaleDateString("en-US", {
+                    month: "long",
+                    day: "numeric",
+                    year: "numeric",
+                  })}
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <div className="space-y-2 text-sm text-muted-foreground">
+                  <div className="flex items-center">
+                    <Clock className="mr-2 h-3.5 w-3.5" />
+                    {event.hours} Hours Credit
+                  </div>
+                  <div className="flex items-center">
+                    <Users className="mr-2 h-3.5 w-3.5" />
+                    {event.provider || "Internal"}
+                  </div>
+                </div>
+              </CardContent>
+              <CardFooter className="border-t bg-muted/20 pt-2">
+                <div className="flex w-full items-center justify-between">
+                  <Badge variant="outline">{event.workflowStatus}</Badge>
+                  <div className="flex items-center gap-2">
+                    {canSubmit && (event.workflowStatus === "draft" || event.workflowStatus === "returned") ? (
+                      <Button variant="outline" size="sm" onClick={() => handleSubmit(event.id)}>
+                        Submit
+                      </Button>
+                    ) : null}
+                    <Button variant="link" size="sm" className="h-auto p-0" onClick={() => setDetailsEvent(event)}>
+                      View Details
+                    </Button>
+                  </div>
+                </div>
+              </CardFooter>
+            </Card>
+          );
+        })}
+      </div>
+
+      <Dialog open={Boolean(detailsEvent)} onOpenChange={() => setDetailsEvent(null)}>
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle>{detailsEvent?.title || "Training Event"}</DialogTitle>
+            <DialogDescription className="sr-only">
+              Training event details.
+            </DialogDescription>
+          </DialogHeader>
+          {detailsEvent ? (
+            <div className="space-y-3 text-sm">
+              <div className="rounded-md border bg-muted/20 p-3">
+                <div>
+                  <span className="font-medium">Date:</span> {detailsEvent.startDate} to {detailsEvent.endDate}
+                </div>
+                <div>
+                  <span className="font-medium">Delivery:</span> {detailsEvent.deliveryMode}
+                </div>
+                <div>
+                  <span className="font-medium">Visibility:</span> {detailsEvent.visibilityScope}
+                </div>
+                <div>
+                  <span className="font-medium">Mandatory:</span>{" "}
+                  {detailsEvent.isMandatory ? "Yes" : "No"}
+                </div>
+                <div>
+                  <span className="font-medium">Provider:</span> {detailsEvent.provider || "Internal"}
+                </div>
+                <div>
+                  <span className="font-medium">Hours:</span> {detailsEvent.hours}
                 </div>
               </div>
-            </CardFooter>
-          </Card>
-        ))}
-      </div>
+              {detailsEvent.description ? (
+                <div>
+                  <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                    Description
+                  </div>
+                  <p className="mt-1">{detailsEvent.description}</p>
+                </div>
+              ) : null}
+              <div className="space-y-2">
+                <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                  Evidence
+                </div>
+                <EvidenceManager
+                  entityType="training_event"
+                  entityId={detailsEvent.id}
+                  canUpload={canUploadEvidence}
+                  canDelete={canDeleteEvidence}
+                />
+              </div>
+            </div>
+          ) : null}
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={archiveDialogOpen}
+        onOpenChange={(open) => {
+          setArchiveDialogOpen(open);
+          if (!open) {
+            setArchiveTargetEvent(null);
+            setArchiveReason("");
+          }
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Archive Training Event</DialogTitle>
+            <DialogDescription>
+              Provide a reason before archiving {archiveTargetEvent?.title || "this event"}.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3">
+            <Textarea
+              placeholder="Reason for archive"
+              value={archiveReason}
+              onChange={(event) => setArchiveReason(event.target.value)}
+            />
+            <Button
+              variant="destructive"
+              disabled={archiveReason.trim().length < 3}
+              onClick={handleArchive}
+            >
+              Archive
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

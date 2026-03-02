@@ -13,6 +13,15 @@ import { CheckCircle2, XCircle, FileText, Lock, RotateCcw } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { apiRequest, getQueryFn, queryClient } from "@/lib/queryClient";
 import { LoadingState } from "@/components/ui/loading-state";
+import { useState } from "react";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Textarea } from "@/components/ui/textarea";
 
 type ApprovalState = "submitted" | "approved" | "locked";
 
@@ -71,6 +80,8 @@ const typeBadgeClassByType: Record<ApprovalItem["type"], string> = {
 };
 
 export default function Approvals() {
+  const [returnDialogItem, setReturnDialogItem] = useState<ApprovalItem | null>(null);
+  const [returnNotes, setReturnNotes] = useState("");
   const { data, isLoading: approvalsLoading } = useQuery<any>({
     queryKey: ["/api/approvals"],
     queryFn: getQueryFn({ on401: "throw" }),
@@ -187,13 +198,12 @@ export default function Approvals() {
     queryClient.invalidateQueries({ queryKey: ["/api/approvals"] });
   };
 
-  const handleReturn = async (item: ApprovalItem) => {
-    const notes = window.prompt("Enter return notes:");
-    if (!notes) return;
+  const handleReturn = async (item: ApprovalItem, notes: string) => {
+    if (!notes.trim()) return;
     if (item.type === "training") {
-      await apiRequest("POST", `/api/training-events/${item.id}/return`, { notes });
+      await apiRequest("POST", `/api/training-events/${item.id}/return`, { notes: notes.trim() });
     } else {
-      await apiRequest("POST", `/api/attendance/${item.id}/return`, { notes });
+      await apiRequest("POST", `/api/attendance/${item.id}/return`, { notes: notes.trim() });
     }
     queryClient.invalidateQueries({ queryKey: ["/api/approvals"] });
   };
@@ -264,7 +274,10 @@ export default function Approvals() {
               <Button
                 variant="outline"
                 className="text-destructive hover:text-destructive hover:bg-destructive/10"
-                onClick={() => handleReturn(item)}
+                onClick={() => {
+                  setReturnDialogItem(item);
+                  setReturnNotes(item.returnNotes || "");
+                }}
               >
                 <XCircle className="mr-2 h-4 w-4" />
                 Return
@@ -339,6 +352,43 @@ export default function Approvals() {
           )}
         </TabsContent>
       </Tabs>
+
+      <Dialog
+        open={Boolean(returnDialogItem)}
+        onOpenChange={(open) => {
+          if (!open) {
+            setReturnDialogItem(null);
+            setReturnNotes("");
+          }
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Return for Revision</DialogTitle>
+            <DialogDescription>
+              Provide clear return notes for this record.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3">
+            <Textarea
+              value={returnNotes}
+              onChange={(event) => setReturnNotes(event.target.value)}
+              placeholder="Explain what needs to be corrected."
+            />
+            <Button
+              disabled={!returnNotes.trim() || !returnDialogItem}
+              onClick={async () => {
+                if (!returnDialogItem) return;
+                await handleReturn(returnDialogItem, returnNotes);
+                setReturnDialogItem(null);
+                setReturnNotes("");
+              }}
+            >
+              Send Back
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

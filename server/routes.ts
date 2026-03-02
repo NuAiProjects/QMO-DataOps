@@ -8,7 +8,12 @@ import multer from "multer";
 import { parse } from "csv-parse/sync";
 import { and, asc, desc, eq, ilike, inArray, or, sql, gte, lte } from "drizzle-orm";
 import { z } from "zod";
-import { configureAuth } from "./auth";
+import {
+  configureAuth,
+  getUserIdsWithPasswordCredentials,
+  setUserPasswordCredential,
+  verifyUserPasswordCredential,
+} from "./auth";
 import { db } from "./db";
 import {
   attachments,
@@ -119,6 +124,19 @@ const attendanceInputSchema = z.object({
 
 const returnSchema = z.object({
   notes: z.string().min(1),
+});
+
+const softDeleteSchema = z.object({
+  reason: z.string().trim().min(3, "Delete reason is required."),
+});
+
+const setPasswordSchema = z.object({
+  password: z.string().trim().min(10, "Password must be at least 10 characters."),
+});
+
+const changePasswordSchema = z.object({
+  currentPassword: z.string().trim().min(1, "Current password is required."),
+  newPassword: z.string().trim().min(10, "New password must be at least 10 characters."),
 });
 
 const resolveRowsSchema = z.object({
@@ -274,6 +292,18 @@ function isSubmittedStatus(status: string) {
   return status === "submitted";
 }
 
+function employeeNotDeletedCondition() {
+  return sql`${employees.deletedAt} is null`;
+}
+
+function trainingEventNotDeletedCondition() {
+  return sql`${trainingEvents.deletedAt} is null`;
+}
+
+function attendanceNotDeletedCondition() {
+  return sql`${attendanceRecords.deletedAt} is null`;
+}
+
 async function isEntityInScope(
   entityType: "attendance_record" | "training_event" | "employee",
   entityId: string,
@@ -283,7 +313,7 @@ async function isEntityInScope(
     const [row] = await db
       .select({ ownerUnitId: trainingEvents.ownerUnitId })
       .from(trainingEvents)
-      .where(eq(trainingEvents.id, entityId))
+      .where(and(eq(trainingEvents.id, entityId), trainingEventNotDeletedCondition()))
       .limit(1);
     return !!row && scopeUnitIds.includes(row.ownerUnitId);
   }
@@ -291,20 +321,20 @@ async function isEntityInScope(
     const [row] = await db
       .select({ unitId: employees.unitId })
       .from(employees)
-      .where(eq(employees.id, entityId))
+      .where(and(eq(employees.id, entityId), employeeNotDeletedCondition()))
       .limit(1);
     return !!row && scopeUnitIds.includes(row.unitId);
   }
   const [attendanceRow] = await db
     .select({ employeeId: attendanceRecords.employeeId })
     .from(attendanceRecords)
-    .where(eq(attendanceRecords.id, entityId))
+    .where(and(eq(attendanceRecords.id, entityId), attendanceNotDeletedCondition()))
     .limit(1);
   if (!attendanceRow) return false;
   const [employeeRow] = await db
     .select({ unitId: employees.unitId })
     .from(employees)
-    .where(eq(employees.id, attendanceRow.employeeId))
+    .where(and(eq(employees.id, attendanceRow.employeeId), employeeNotDeletedCondition()))
     .limit(1);
   return !!employeeRow && scopeUnitIds.includes(employeeRow.unitId);
 }
@@ -358,6 +388,77 @@ async function getDescendantUnits(
     for (const child of children) stack.push(child);
   }
   return Array.from(result);
+}
+
+async function getUnitParentMap() {
+  const rows = await db
+    .select({ id: units.id, parentUnitId: units.parentUnitId })
+    .from(units);
+  const map = new Map<string, string | null>();
+  for (const row of rows) {
+    map.set(row.id, row.parentUnitId ?? null);
+  }
+  return map;
+}
+
+function getRootUnitId(
+  unitId: string,
+  parentMap: Map<string, string | null>,
+) {
+  let current: string | null | undefined = unitId;
+  let guard = 0;
+  while (current && guard < 1024) {
+    const parent = parentMap.get(current);
+    if (!parent) return current;
+    current = parent;
+    guard += 1;
+  }
+  return unitId;
+}
+
+function isSameOrDescendantUnit(
+  candidateUnitId: string,
+  ancestorUnitId: string,
+  parentMap: Map<string, string | null>,
+) {
+  let current: string | null | undefined = candidateUnitId;
+  let guard = 0;
+  while (current && guard < 1024) {
+    if (current === ancestorUnitId) {
+      return true;
+    }
+    current = parentMap.get(current) ?? null;
+    guard += 1;
+  }
+  return false;
+}
+
+function isTrainingEventVisibleToUnit(
+  event: { ownerUnitId: string; visibilityScope: string | null | undefined },
+  unitId: string,
+  parentMap: Map<string, string | null>,
+) {
+  const visibilityScope = event.visibilityScope || "unit";
+  if (visibilityScope === "org") {
+    return true;
+  }
+  if (visibilityScope === "department") {
+    return (
+      getRootUnitId(event.ownerUnitId, parentMap) ===
+      getRootUnitId(unitId, parentMap)
+    );
+  }
+  return isSameOrDescendantUnit(unitId, event.ownerUnitId, parentMap);
+}
+
+function isTrainingEventVisibleToScope(
+  event: { ownerUnitId: string; visibilityScope: string | null | undefined },
+  unitIds: string[],
+  parentMap: Map<string, string | null>,
+) {
+  return unitIds.some((unitId) =>
+    isTrainingEventVisibleToUnit(event, unitId, parentMap),
+  );
 }
 
 const reportQuerySchema = z.object({
@@ -506,6 +607,9 @@ export async function registerRoutes(
     async (req, res) => {
     const rows = await db.select().from(users).orderBy(asc(users.fullName));
     const userUnitRows = await db.select().from(userUnits);
+    const usersWithPassword = await getUserIdsWithPasswordCredentials(
+      rows.map((row) => row.id),
+    );
     const unitMap = userUnitRows.reduce<Record<string, string[]>>((acc, row) => {
       acc[row.userId] = acc[row.userId] || [];
       acc[row.userId].push(row.unitId);
@@ -513,7 +617,11 @@ export async function registerRoutes(
     }, {});
       if (req.user!.role === "super_admin" || req.user!.role === "hr_qa_approver") {
         return res.json({
-          users: rows.map((user) => ({ ...user, unitIds: unitMap[user.id] || [] })),
+          users: rows.map((user) => ({
+            ...user,
+            unitIds: unitMap[user.id] || [],
+            hasPassword: usersWithPassword.has(user.id),
+          })),
         });
       }
 
@@ -532,6 +640,7 @@ export async function registerRoutes(
           role: user.role,
           isActive: user.isActive,
           unitIds: unitMap[user.id] || [],
+          hasPassword: usersWithPassword.has(user.id),
         })),
       });
     },
@@ -605,6 +714,65 @@ export async function registerRoutes(
     res.json({ user: updated });
   });
 
+  api.post("/users/:id/password", requireRole(["super_admin"]), async (req, res) => {
+    const parsed = setPasswordSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ message: parsed.error.flatten() });
+    }
+    const userId = getRouteParam(req.params.id);
+    const [target] = await db
+      .select()
+      .from(users)
+      .where(eq(users.id, userId))
+      .limit(1);
+    if (!target) {
+      return res.status(404).json({ message: "User not found." });
+    }
+
+    await setUserPasswordCredential({
+      userId,
+      plainPassword: parsed.data.password,
+      updatedByUserId: req.user!.id,
+    });
+    await logAudit({
+      actorUserId: req.user!.id,
+      action: "user.password.set",
+      entityType: "user",
+      entityId: userId,
+      ip: req.ip,
+    });
+    res.json({ ok: true });
+  });
+
+  api.post("/auth/change-password", async (req, res) => {
+    const parsed = changePasswordSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ message: parsed.error.flatten() });
+    }
+
+    const isCurrentPasswordValid = await verifyUserPasswordCredential(
+      req.user!.id,
+      parsed.data.currentPassword,
+    );
+    if (!isCurrentPasswordValid) {
+      return res.status(401).json({ message: "Current password is incorrect." });
+    }
+
+    await setUserPasswordCredential({
+      userId: req.user!.id,
+      plainPassword: parsed.data.newPassword,
+      updatedByUserId: req.user!.id,
+    });
+    await logAudit({
+      actorUserId: req.user!.id,
+      action: "auth.password.change",
+      entityType: "auth_session",
+      entityId: null,
+      ip: req.ip,
+    });
+    res.json({ ok: true });
+  });
+
   api.get("/employees", async (req, res) => {
     const scopeUnitIds = await getScopedUnitIds(req.user!);
     if (scopeUnitIds.length === 0) {
@@ -633,7 +801,7 @@ export async function registerRoutes(
           : [unitId];
     }
 
-    const filters = [inArray(employees.unitId, allowedUnits)];
+    const filters = [inArray(employees.unitId, allowedUnits), employeeNotDeletedCondition()];
     if (q) {
       filters.push(
         or(
@@ -670,7 +838,7 @@ export async function registerRoutes(
       const [emailInUse] = await db
         .select({ id: employees.id })
         .from(employees)
-        .where(ilike(employees.email, normalizedEmail))
+        .where(and(ilike(employees.email, normalizedEmail), employeeNotDeletedCondition()))
         .limit(1);
       if (emailInUse) {
         return res.status(409).json({ message: "An employee with this email already exists." });
@@ -817,7 +985,7 @@ export async function registerRoutes(
           unitId: employees.unitId,
         })
         .from(employees)
-        .where(inArray(employees.unitId, scopeUnitIds));
+        .where(and(inArray(employees.unitId, scopeUnitIds), employeeNotDeletedCondition()));
 
       const existingByEmail = new Map<
         string,
@@ -841,7 +1009,7 @@ export async function registerRoutes(
           unitId: employees.unitId,
         })
         .from(employees)
-        .where(sql`${employees.email} is not null`);
+        .where(and(sql`${employees.email} is not null`, employeeNotDeletedCondition()));
       for (const existing of allEmployeesWithEmail) {
         if (!existing.email) continue;
         const normalizedGlobalEmail = normalizeCsvText(existing.email);
@@ -1041,7 +1209,7 @@ export async function registerRoutes(
               employmentStatus,
               updatedAt: new Date(),
             })
-            .where(eq(employees.id, existing.id))
+            .where(and(eq(employees.id, existing.id), employeeNotDeletedCondition()))
             .returning();
           existingByEmail.set(normalizedEmail, updated);
           globalEmployeeByEmail.set(normalizedEmail, {
@@ -1115,7 +1283,7 @@ export async function registerRoutes(
       const [existing] = await db
         .select()
         .from(employees)
-        .where(eq(employees.id, employeeId))
+        .where(and(eq(employees.id, employeeId), employeeNotDeletedCondition()))
         .limit(1);
       if (!existing) {
         return res.status(404).json({ message: "Employee not found." });
@@ -1138,7 +1306,13 @@ export async function registerRoutes(
         const [duplicateEmail] = await db
           .select({ id: employees.id })
           .from(employees)
-          .where(and(ilike(employees.email, incomingEmail), sql`${employees.id} <> ${employeeId}`))
+          .where(
+            and(
+              ilike(employees.email, incomingEmail),
+              sql`${employees.id} <> ${employeeId}`,
+              employeeNotDeletedCondition(),
+            ),
+          )
           .limit(1);
         if (duplicateEmail) {
           return res.status(409).json({ message: "An employee with this email already exists." });
@@ -1157,7 +1331,7 @@ export async function registerRoutes(
           employeeNo: nextEmail,
           updatedAt: new Date(),
         })
-        .where(eq(employees.id, employeeId))
+        .where(and(eq(employees.id, employeeId), employeeNotDeletedCondition()))
         .returning();
       await logAudit({
         actorUserId: req.user!.id,
@@ -1170,6 +1344,51 @@ export async function registerRoutes(
       });
     res.json({ employee: updated });
   },
+  );
+
+  api.delete(
+    "/employees/:id",
+    requireAnyRoleOrSuperAdmin(["encoder", "unit_head", "hr_qa_approver"]),
+    async (req, res) => {
+      const parsed = softDeleteSchema.safeParse(req.body);
+      if (!parsed.success) {
+        return res.status(400).json({ message: parsed.error.flatten() });
+      }
+      const employeeId = getRouteParam(req.params.id);
+      const [existing] = await db
+        .select()
+        .from(employees)
+        .where(and(eq(employees.id, employeeId), employeeNotDeletedCondition()))
+        .limit(1);
+      if (!existing) {
+        return res.status(404).json({ message: "Employee not found." });
+      }
+      const scopeUnitIds = await getScopedUnitIds(req.user!);
+      if (!scopeUnitIds.includes(existing.unitId)) {
+        return res.status(403).json({ message: "Unit out of scope." });
+      }
+      const now = new Date();
+      const [deleted] = await db
+        .update(employees)
+        .set({
+          deletedAt: now,
+          deletedBy: req.user!.id,
+          deleteReason: parsed.data.reason,
+          updatedAt: now,
+        })
+        .where(and(eq(employees.id, employeeId), employeeNotDeletedCondition()))
+        .returning();
+      await logAudit({
+        actorUserId: req.user!.id,
+        action: "employee.soft_delete",
+        entityType: "employee",
+        entityId: employeeId,
+        beforeJson: existing,
+        afterJson: deleted,
+        ip: req.ip,
+      });
+      res.json({ employee: deleted });
+    },
   );
 
   api.get("/training-events", async (req, res) => {
@@ -1197,16 +1416,20 @@ export async function registerRoutes(
           ? await getDescendantUnits(unitId, scopeUnitIds)
           : [unitId];
     }
-    const filters = [inArray(trainingEvents.ownerUnitId, allowedUnits)];
+    const filters = [trainingEventNotDeletedCondition()];
     if (status) {
       filters.push(eq(trainingEvents.workflowStatus, status));
     }
     const rows = await db
       .select()
       .from(trainingEvents)
-      .where(and(...filters))
+      .where(filters.length > 0 ? and(...filters) : undefined)
       .orderBy(desc(trainingEvents.startDate));
-    res.json({ trainingEvents: rows });
+    const parentMap = await getUnitParentMap();
+    const scopedRows = rows.filter((row) =>
+      isTrainingEventVisibleToScope(row, allowedUnits, parentMap),
+    );
+    res.json({ trainingEvents: scopedRows });
   });
 
   api.post(
@@ -1256,7 +1479,7 @@ export async function registerRoutes(
       const [existing] = await db
         .select()
         .from(trainingEvents)
-        .where(eq(trainingEvents.id, eventId))
+        .where(and(eq(trainingEvents.id, eventId), trainingEventNotDeletedCondition()))
         .limit(1);
       if (!existing) {
         return res.status(404).json({ message: "Training event not found." });
@@ -1279,7 +1502,7 @@ export async function registerRoutes(
           updatedBy: req.user!.id,
           updatedAt: new Date(),
         })
-        .where(eq(trainingEvents.id, eventId))
+        .where(and(eq(trainingEvents.id, eventId), trainingEventNotDeletedCondition()))
         .returning();
       await logAudit({
         actorUserId: req.user!.id,
@@ -1294,6 +1517,52 @@ export async function registerRoutes(
     },
   );
 
+  api.delete(
+    "/training-events/:id",
+    requireAnyRoleOrSuperAdmin(["encoder", "unit_head", "hr_qa_approver"]),
+    async (req, res) => {
+      const parsed = softDeleteSchema.safeParse(req.body);
+      if (!parsed.success) {
+        return res.status(400).json({ message: parsed.error.flatten() });
+      }
+      const eventId = getRouteParam(req.params.id);
+      const [existing] = await db
+        .select()
+        .from(trainingEvents)
+        .where(and(eq(trainingEvents.id, eventId), trainingEventNotDeletedCondition()))
+        .limit(1);
+      if (!existing) {
+        return res.status(404).json({ message: "Training event not found." });
+      }
+      const scopeUnitIds = await getScopedUnitIds(req.user!);
+      if (!scopeUnitIds.includes(existing.ownerUnitId)) {
+        return res.status(403).json({ message: "Unit out of scope." });
+      }
+      const now = new Date();
+      const [deleted] = await db
+        .update(trainingEvents)
+        .set({
+          deletedAt: now,
+          deletedBy: req.user!.id,
+          deleteReason: parsed.data.reason,
+          updatedBy: req.user!.id,
+          updatedAt: now,
+        })
+        .where(and(eq(trainingEvents.id, eventId), trainingEventNotDeletedCondition()))
+        .returning();
+      await logAudit({
+        actorUserId: req.user!.id,
+        action: "training_event.soft_delete",
+        entityType: "training_event",
+        entityId: eventId,
+        beforeJson: existing,
+        afterJson: deleted,
+        ip: req.ip,
+      });
+      res.json({ trainingEvent: deleted });
+    },
+  );
+
   api.post(
     "/training-events/:id/submit",
     requireAnyRoleOrSuperAdmin(["encoder", "unit_head"]),
@@ -1302,7 +1571,7 @@ export async function registerRoutes(
       const [existing] = await db
         .select()
         .from(trainingEvents)
-        .where(eq(trainingEvents.id, eventId))
+        .where(and(eq(trainingEvents.id, eventId), trainingEventNotDeletedCondition()))
         .limit(1);
       if (!existing) {
         return res.status(404).json({ message: "Training event not found." });
@@ -1321,7 +1590,7 @@ export async function registerRoutes(
           updatedBy: req.user!.id,
           updatedAt: new Date(),
         })
-        .where(eq(trainingEvents.id, eventId))
+        .where(and(eq(trainingEvents.id, eventId), trainingEventNotDeletedCondition()))
         .returning();
       await logWorkflowAction({
         entityType: "training_event",
@@ -1354,7 +1623,7 @@ export async function registerRoutes(
       const [existing] = await db
         .select()
         .from(trainingEvents)
-        .where(eq(trainingEvents.id, eventId))
+        .where(and(eq(trainingEvents.id, eventId), trainingEventNotDeletedCondition()))
         .limit(1);
       if (!existing) {
         return res.status(404).json({ message: "Training event not found." });
@@ -1374,7 +1643,7 @@ export async function registerRoutes(
           updatedBy: req.user!.id,
           updatedAt: new Date(),
         })
-        .where(eq(trainingEvents.id, eventId))
+        .where(and(eq(trainingEvents.id, eventId), trainingEventNotDeletedCondition()))
         .returning();
       await logWorkflowAction({
         entityType: "training_event",
@@ -1404,7 +1673,7 @@ export async function registerRoutes(
       const [existing] = await db
         .select()
         .from(trainingEvents)
-        .where(eq(trainingEvents.id, eventId))
+        .where(and(eq(trainingEvents.id, eventId), trainingEventNotDeletedCondition()))
         .limit(1);
       if (!existing) {
         return res.status(404).json({ message: "Training event not found." });
@@ -1423,7 +1692,7 @@ export async function registerRoutes(
           updatedBy: req.user!.id,
           updatedAt: new Date(),
         })
-        .where(eq(trainingEvents.id, eventId))
+        .where(and(eq(trainingEvents.id, eventId), trainingEventNotDeletedCondition()))
         .returning();
       await logWorkflowAction({
         entityType: "training_event",
@@ -1452,7 +1721,7 @@ export async function registerRoutes(
       const [existing] = await db
         .select()
         .from(trainingEvents)
-        .where(eq(trainingEvents.id, eventId))
+        .where(and(eq(trainingEvents.id, eventId), trainingEventNotDeletedCondition()))
         .limit(1);
       if (!existing) {
         return res.status(404).json({ message: "Training event not found." });
@@ -1473,7 +1742,7 @@ export async function registerRoutes(
           updatedBy: req.user!.id,
           updatedAt: new Date(),
         })
-        .where(eq(trainingEvents.id, eventId))
+        .where(and(eq(trainingEvents.id, eventId), trainingEventNotDeletedCondition()))
         .returning();
       await logWorkflowAction({
         entityType: "training_event",
@@ -1502,7 +1771,7 @@ export async function registerRoutes(
       const [existing] = await db
         .select()
         .from(trainingEvents)
-        .where(eq(trainingEvents.id, eventId))
+        .where(and(eq(trainingEvents.id, eventId), trainingEventNotDeletedCondition()))
         .limit(1);
       if (!existing) {
         return res.status(404).json({ message: "Training event not found." });
@@ -1521,7 +1790,7 @@ export async function registerRoutes(
           updatedBy: req.user!.id,
           updatedAt: new Date(),
         })
-        .where(eq(trainingEvents.id, eventId))
+        .where(and(eq(trainingEvents.id, eventId), trainingEventNotDeletedCondition()))
         .returning();
       await logWorkflowAction({
         entityType: "training_event",
@@ -1570,12 +1839,12 @@ export async function registerRoutes(
     const employeeRows = await db
       .select({ id: employees.id })
       .from(employees)
-      .where(inArray(employees.unitId, allowedUnits));
+      .where(and(inArray(employees.unitId, allowedUnits), employeeNotDeletedCondition()));
     const employeeIds = employeeRows.map((row) => row.id);
     if (employeeIds.length === 0) {
       return res.json({ attendance: [] });
     }
-    const filters = [inArray(attendanceRecords.employeeId, employeeIds)];
+    const filters = [inArray(attendanceRecords.employeeId, employeeIds), attendanceNotDeletedCondition()];
     if (parsed.data.trainingEventId) {
       filters.push(eq(attendanceRecords.trainingEventId, parsed.data.trainingEventId));
     }
@@ -1601,7 +1870,7 @@ export async function registerRoutes(
       const [employeeRow] = await db
         .select({ unitId: employees.unitId })
         .from(employees)
-        .where(eq(employees.id, parsed.data.employeeId))
+        .where(and(eq(employees.id, parsed.data.employeeId), employeeNotDeletedCondition()))
         .limit(1);
       if (!employeeRow) {
         return res.status(404).json({ message: "Employee not found." });
@@ -1609,7 +1878,7 @@ export async function registerRoutes(
       const [trainingEventRow] = await db
         .select({ ownerUnitId: trainingEvents.ownerUnitId })
         .from(trainingEvents)
-        .where(eq(trainingEvents.id, parsed.data.trainingEventId))
+        .where(and(eq(trainingEvents.id, parsed.data.trainingEventId), trainingEventNotDeletedCondition()))
         .limit(1);
       if (!trainingEventRow) {
         return res.status(404).json({ message: "Training event not found." });
@@ -1625,7 +1894,7 @@ export async function registerRoutes(
         const [targetEmployee] = await db
           .select({ unitId: employees.unitId })
           .from(employees)
-          .where(eq(employees.id, parsed.data.employeeId))
+          .where(and(eq(employees.id, parsed.data.employeeId), employeeNotDeletedCondition()))
           .limit(1);
         if (!targetEmployee || !scopeUnitIds.includes(targetEmployee.unitId)) {
           return res.status(403).json({ message: "Target employee out of scope." });
@@ -1635,7 +1904,7 @@ export async function registerRoutes(
         const [targetEvent] = await db
           .select({ ownerUnitId: trainingEvents.ownerUnitId })
           .from(trainingEvents)
-          .where(eq(trainingEvents.id, parsed.data.trainingEventId))
+          .where(and(eq(trainingEvents.id, parsed.data.trainingEventId), trainingEventNotDeletedCondition()))
           .limit(1);
         if (!targetEvent || !scopeUnitIds.includes(targetEvent.ownerUnitId)) {
           return res.status(403).json({ message: "Target training event out of scope." });
@@ -1675,7 +1944,7 @@ export async function registerRoutes(
       const [existing] = await db
         .select()
         .from(attendanceRecords)
-        .where(eq(attendanceRecords.id, attendanceId))
+        .where(and(eq(attendanceRecords.id, attendanceId), attendanceNotDeletedCondition()))
         .limit(1);
       if (!existing) {
         return res.status(404).json({ message: "Attendance record not found." });
@@ -1686,7 +1955,7 @@ export async function registerRoutes(
       const [employeeRow] = await db
         .select({ unitId: employees.unitId })
         .from(employees)
-        .where(eq(employees.id, existing.employeeId))
+        .where(and(eq(employees.id, existing.employeeId), employeeNotDeletedCondition()))
         .limit(1);
       if (!employeeRow) {
         return res.status(404).json({ message: "Employee not found." });
@@ -1694,7 +1963,7 @@ export async function registerRoutes(
       const [trainingEventRow] = await db
         .select({ ownerUnitId: trainingEvents.ownerUnitId })
         .from(trainingEvents)
-        .where(eq(trainingEvents.id, existing.trainingEventId))
+        .where(and(eq(trainingEvents.id, existing.trainingEventId), trainingEventNotDeletedCondition()))
         .limit(1);
       if (!trainingEventRow) {
         return res.status(404).json({ message: "Training event not found." });
@@ -1716,7 +1985,7 @@ export async function registerRoutes(
           updatedBy: req.user!.id,
           updatedAt: new Date(),
         })
-        .where(eq(attendanceRecords.id, attendanceId))
+        .where(and(eq(attendanceRecords.id, attendanceId), attendanceNotDeletedCondition()))
         .returning();
       await logAudit({
         actorUserId: req.user!.id,
@@ -1731,6 +2000,56 @@ export async function registerRoutes(
     },
   );
 
+  api.delete(
+    "/attendance/:id",
+    requireAnyRoleOrSuperAdmin(["encoder", "unit_head", "hr_qa_approver"]),
+    async (req, res) => {
+      const parsed = softDeleteSchema.safeParse(req.body);
+      if (!parsed.success) {
+        return res.status(400).json({ message: parsed.error.flatten() });
+      }
+      const attendanceId = getRouteParam(req.params.id);
+      const [existing] = await db
+        .select()
+        .from(attendanceRecords)
+        .where(and(eq(attendanceRecords.id, attendanceId), attendanceNotDeletedCondition()))
+        .limit(1);
+      if (!existing) {
+        return res.status(404).json({ message: "Attendance record not found." });
+      }
+      const allowed = await isEntityInScope(
+        "attendance_record",
+        attendanceId,
+        await getScopedUnitIds(req.user!),
+      );
+      if (!allowed) {
+        return res.status(403).json({ message: "Attendance record out of scope." });
+      }
+      const now = new Date();
+      const [deleted] = await db
+        .update(attendanceRecords)
+        .set({
+          deletedAt: now,
+          deletedBy: req.user!.id,
+          deleteReason: parsed.data.reason,
+          updatedBy: req.user!.id,
+          updatedAt: now,
+        })
+        .where(and(eq(attendanceRecords.id, attendanceId), attendanceNotDeletedCondition()))
+        .returning();
+      await logAudit({
+        actorUserId: req.user!.id,
+        action: "attendance.soft_delete",
+        entityType: "attendance_record",
+        entityId: attendanceId,
+        beforeJson: existing,
+        afterJson: deleted,
+        ip: req.ip,
+      });
+      res.json({ attendance: deleted });
+    },
+  );
+
   api.post(
     "/attendance/:id/submit",
     requireAnyRoleOrSuperAdmin(["encoder", "unit_head"]),
@@ -1739,7 +2058,7 @@ export async function registerRoutes(
       const [existing] = await db
         .select()
         .from(attendanceRecords)
-        .where(eq(attendanceRecords.id, attendanceId))
+        .where(and(eq(attendanceRecords.id, attendanceId), attendanceNotDeletedCondition()))
         .limit(1);
       if (!existing) {
         return res.status(404).json({ message: "Attendance record not found." });
@@ -1754,7 +2073,7 @@ export async function registerRoutes(
           updatedBy: req.user!.id,
           updatedAt: new Date(),
         })
-        .where(eq(attendanceRecords.id, attendanceId))
+        .where(and(eq(attendanceRecords.id, attendanceId), attendanceNotDeletedCondition()))
         .returning();
       await logWorkflowAction({
         entityType: "attendance_record",
@@ -1787,7 +2106,7 @@ export async function registerRoutes(
       const [existing] = await db
         .select()
         .from(attendanceRecords)
-        .where(eq(attendanceRecords.id, attendanceId))
+        .where(and(eq(attendanceRecords.id, attendanceId), attendanceNotDeletedCondition()))
         .limit(1);
       if (!existing) {
         return res.status(404).json({ message: "Attendance record not found." });
@@ -1808,7 +2127,7 @@ export async function registerRoutes(
           updatedBy: req.user!.id,
           updatedAt: new Date(),
         })
-        .where(eq(attendanceRecords.id, attendanceId))
+        .where(and(eq(attendanceRecords.id, attendanceId), attendanceNotDeletedCondition()))
         .returning();
       await logWorkflowAction({
         entityType: "attendance_record",
@@ -1838,7 +2157,7 @@ export async function registerRoutes(
       const [existing] = await db
         .select()
         .from(attendanceRecords)
-        .where(eq(attendanceRecords.id, attendanceId))
+        .where(and(eq(attendanceRecords.id, attendanceId), attendanceNotDeletedCondition()))
         .limit(1);
       if (!existing) {
         return res.status(404).json({ message: "Attendance record not found." });
@@ -1858,7 +2177,7 @@ export async function registerRoutes(
           updatedBy: req.user!.id,
           updatedAt: new Date(),
         })
-        .where(eq(attendanceRecords.id, attendanceId))
+        .where(and(eq(attendanceRecords.id, attendanceId), attendanceNotDeletedCondition()))
         .returning();
       await logWorkflowAction({
         entityType: "attendance_record",
@@ -1887,7 +2206,7 @@ export async function registerRoutes(
       const [existing] = await db
         .select()
         .from(attendanceRecords)
-        .where(eq(attendanceRecords.id, attendanceId))
+        .where(and(eq(attendanceRecords.id, attendanceId), attendanceNotDeletedCondition()))
         .limit(1);
       if (!existing) {
         return res.status(404).json({ message: "Attendance record not found." });
@@ -1909,7 +2228,7 @@ export async function registerRoutes(
           updatedBy: req.user!.id,
           updatedAt: new Date(),
         })
-        .where(eq(attendanceRecords.id, attendanceId))
+        .where(and(eq(attendanceRecords.id, attendanceId), attendanceNotDeletedCondition()))
         .returning();
       await logWorkflowAction({
         entityType: "attendance_record",
@@ -1938,7 +2257,7 @@ export async function registerRoutes(
       const [existing] = await db
         .select()
         .from(attendanceRecords)
-        .where(eq(attendanceRecords.id, attendanceId))
+        .where(and(eq(attendanceRecords.id, attendanceId), attendanceNotDeletedCondition()))
         .limit(1);
       if (!existing) {
         return res.status(404).json({ message: "Attendance record not found." });
@@ -1958,7 +2277,7 @@ export async function registerRoutes(
           updatedBy: req.user!.id,
           updatedAt: new Date(),
         })
-        .where(eq(attendanceRecords.id, attendanceId))
+        .where(and(eq(attendanceRecords.id, attendanceId), attendanceNotDeletedCondition()))
         .returning();
       await logWorkflowAction({
         entityType: "attendance_record",
@@ -1994,7 +2313,7 @@ export async function registerRoutes(
       const [trainingEvent] = await db
         .select()
         .from(trainingEvents)
-        .where(eq(trainingEvents.id, trainingEventId))
+        .where(and(eq(trainingEvents.id, trainingEventId), trainingEventNotDeletedCondition()))
         .limit(1);
       if (!trainingEvent) {
         return res.status(404).json({ message: "Training event not found." });
@@ -2050,7 +2369,7 @@ export async function registerRoutes(
           fullName: employees.fullName,
         })
         .from(employees)
-        .where(inArray(employees.unitId, scopeUnitIds));
+        .where(and(inArray(employees.unitId, scopeUnitIds), employeeNotDeletedCondition()));
 
       type ScopedEmployee = (typeof employeeRows)[number];
       const employeeEmailMap = new Map<string, ScopedEmployee[]>();
@@ -2250,7 +2569,7 @@ export async function registerRoutes(
           const [employeeRow] = await db
             .select({ unitId: employees.unitId })
             .from(employees)
-            .where(eq(employees.id, resolution.employeeId))
+            .where(and(eq(employees.id, resolution.employeeId), employeeNotDeletedCondition()))
             .limit(1);
           if (!employeeRow || !scopeUnitIds.includes(employeeRow.unitId)) {
             return res.status(403).json({ message: "Employee out of scope." });
@@ -2296,7 +2615,7 @@ export async function registerRoutes(
           hours: trainingEvents.hours,
         })
         .from(trainingEvents)
-        .where(eq(trainingEvents.id, batch.trainingEventId))
+        .where(and(eq(trainingEvents.id, batch.trainingEventId), trainingEventNotDeletedCondition()))
         .limit(1);
       if (!trainingEvent) {
         return res.status(404).json({ message: "Training event not found." });
@@ -2350,6 +2669,7 @@ export async function registerRoutes(
               eq(attendanceRecords.trainingEventId, batch.trainingEventId),
               eq(attendanceRecords.employeeId, row.resolvedEmployeeId),
               eq(attendanceRecords.attendanceDate, attendanceDate),
+              attendanceNotDeletedCondition(),
             ),
           )
           .limit(1);
@@ -2373,7 +2693,7 @@ export async function registerRoutes(
               updatedBy: req.user!.id,
               updatedAt: new Date(),
             })
-            .where(eq(attendanceRecords.id, existing.id));
+            .where(and(eq(attendanceRecords.id, existing.id), attendanceNotDeletedCondition()));
           results.updated += 1;
         } else {
           await db.insert(attendanceRecords).values({
@@ -2458,6 +2778,37 @@ export async function registerRoutes(
       res.status(201).json({ attachment });
     },
   );
+
+  api.get("/attachments", async (req, res) => {
+    const schema = z.object({
+      entityType: z.enum(["attendance_record", "training_event", "employee"]),
+      entityId: z.string().uuid(),
+    });
+    const parsed = schema.safeParse(req.query);
+    if (!parsed.success) {
+      return res.status(400).json({ message: parsed.error.flatten() });
+    }
+    const scopeUnitIds = await getScopedUnitIds(req.user!);
+    const allowed = await isEntityInScope(
+      parsed.data.entityType,
+      parsed.data.entityId,
+      scopeUnitIds,
+    );
+    if (!allowed) {
+      return res.status(403).json({ message: "Entity out of scope." });
+    }
+    const rows = await db
+      .select()
+      .from(attachments)
+      .where(
+        and(
+          eq(attachments.entityType, parsed.data.entityType),
+          eq(attachments.entityId, parsed.data.entityId),
+        ),
+      )
+      .orderBy(desc(attachments.uploadedAt));
+    res.json({ attachments: rows });
+  });
 
   api.get("/attachments/:id/download", async (req, res) => {
     const attachmentId = getRouteParam(req.params.id);
@@ -2549,7 +2900,7 @@ export async function registerRoutes(
         updatedAt: employees.updatedAt,
       })
       .from(employees)
-      .where(inArray(employees.unitId, scopeUnitIds))
+      .where(and(inArray(employees.unitId, scopeUnitIds), employeeNotDeletedCondition()))
       .orderBy(desc(employees.updatedAt))
       .limit(sourceLimit);
 
@@ -2563,7 +2914,7 @@ export async function registerRoutes(
         updatedAt: trainingEvents.updatedAt,
       })
       .from(trainingEvents)
-      .where(inArray(trainingEvents.ownerUnitId, scopeUnitIds))
+      .where(and(inArray(trainingEvents.ownerUnitId, scopeUnitIds), trainingEventNotDeletedCondition()))
       .orderBy(desc(trainingEvents.updatedAt))
       .limit(sourceLimit);
 
@@ -2581,7 +2932,14 @@ export async function registerRoutes(
       .from(attendanceRecords)
       .innerJoin(employees, eq(attendanceRecords.employeeId, employees.id))
       .innerJoin(trainingEvents, eq(attendanceRecords.trainingEventId, trainingEvents.id))
-      .where(inArray(employees.unitId, scopeUnitIds))
+      .where(
+        and(
+          inArray(employees.unitId, scopeUnitIds),
+          employeeNotDeletedCondition(),
+          trainingEventNotDeletedCondition(),
+          attendanceNotDeletedCondition(),
+        ),
+      )
       .orderBy(desc(attendanceRecords.updatedAt))
       .limit(sourceLimit);
 
@@ -2687,6 +3045,7 @@ export async function registerRoutes(
       .where(
         and(
           inArray(employees.unitId, scopeUnitIds),
+          employeeNotDeletedCondition(),
           or(
             ilike(employees.fullName, likeTerm),
             ilike(employees.employeeNo, likeTerm),
@@ -2707,6 +3066,7 @@ export async function registerRoutes(
       .where(
         and(
           inArray(trainingEvents.ownerUnitId, scopeUnitIds),
+          trainingEventNotDeletedCondition(),
           or(
             ilike(trainingEvents.title, likeTerm),
             ilike(trainingEvents.category, likeTerm),
@@ -2804,7 +3164,9 @@ export async function registerRoutes(
 
     const filters = [
       inArray(employees.unitId, allowedUnits),
+      employeeNotDeletedCondition(),
       inArray(attendanceRecords.workflowStatus, ["approved", "locked"]),
+      attendanceNotDeletedCondition(),
     ];
     if (parsed.data.from) {
       filters.push(gte(attendanceRecords.attendanceDate, parsed.data.from));
@@ -2868,7 +3230,9 @@ export async function registerRoutes(
 
     const filters = [
       inArray(employees.unitId, allowedUnits),
+      employeeNotDeletedCondition(),
       inArray(attendanceRecords.workflowStatus, ["approved", "locked"]),
+      attendanceNotDeletedCondition(),
     ];
     if (parsed.data.from) {
       filters.push(gte(attendanceRecords.attendanceDate, parsed.data.from));
@@ -2955,10 +3319,7 @@ export async function registerRoutes(
           : [parsed.data.unitId];
     }
 
-    const mandatoryFilters = [
-      eq(trainingEvents.isMandatory, true),
-      inArray(trainingEvents.ownerUnitId, allowedUnits),
-    ];
+    const mandatoryFilters = [eq(trainingEvents.isMandatory, true), trainingEventNotDeletedCondition()];
     if (parsed.data.from) {
       mandatoryFilters.push(gte(trainingEvents.startDate, parsed.data.from));
     }
@@ -2967,11 +3328,18 @@ export async function registerRoutes(
     }
 
     const mandatoryEvents = await db
-      .select({ id: trainingEvents.id })
+      .select({
+        id: trainingEvents.id,
+        ownerUnitId: trainingEvents.ownerUnitId,
+        visibilityScope: trainingEvents.visibilityScope,
+      })
       .from(trainingEvents)
       .where(and(...mandatoryFilters));
-    const mandatoryIds = mandatoryEvents.map((event) => event.id);
-    const totalMandatory = mandatoryIds.length;
+    const parentMap = await getUnitParentMap();
+    const visibleMandatoryEvents = mandatoryEvents.filter((event) =>
+      isTrainingEventVisibleToScope(event, allowedUnits, parentMap),
+    );
+    const mandatoryIds = visibleMandatoryEvents.map((event) => event.id);
 
     const employeeRows = await db
       .select({
@@ -2981,14 +3349,25 @@ export async function registerRoutes(
         unitId: employees.unitId,
       })
       .from(employees)
-      .where(inArray(employees.unitId, allowedUnits));
+      .where(and(inArray(employees.unitId, allowedUnits), employeeNotDeletedCondition()));
 
-    const completedMap = new Map<string, number>();
+    const applicableMandatoryIdsByEmployee = new Map<string, Set<string>>();
+    for (const employee of employeeRows) {
+      const applicable = new Set<string>();
+      for (const event of visibleMandatoryEvents) {
+        if (isTrainingEventVisibleToUnit(event, employee.unitId, parentMap)) {
+          applicable.add(event.id);
+        }
+      }
+      applicableMandatoryIdsByEmployee.set(employee.employeeId, applicable);
+    }
+
+    const completedMap = new Map<string, Set<string>>();
     if (mandatoryIds.length > 0 && employeeRows.length > 0) {
       const attendanceRows = await db
         .select({
           employeeId: attendanceRecords.employeeId,
-          completedCount: sql<number>`count(distinct ${attendanceRecords.trainingEventId})`,
+          trainingEventId: attendanceRecords.trainingEventId,
         })
         .from(attendanceRecords)
         .where(
@@ -2996,16 +3375,25 @@ export async function registerRoutes(
             inArray(attendanceRecords.employeeId, employeeRows.map((row) => row.employeeId)),
             inArray(attendanceRecords.trainingEventId, mandatoryIds),
             inArray(attendanceRecords.workflowStatus, ["approved", "locked"]),
+            attendanceNotDeletedCondition(),
           ),
         )
-        .groupBy(attendanceRecords.employeeId);
+        .groupBy(attendanceRecords.employeeId, attendanceRecords.trainingEventId);
       for (const row of attendanceRows) {
-        completedMap.set(row.employeeId, Number(row.completedCount));
+        const applicableMandatoryIds = applicableMandatoryIdsByEmployee.get(row.employeeId);
+        if (!applicableMandatoryIds || !applicableMandatoryIds.has(row.trainingEventId)) {
+          continue;
+        }
+        const completed = completedMap.get(row.employeeId) || new Set<string>();
+        completed.add(row.trainingEventId);
+        completedMap.set(row.employeeId, completed);
       }
     }
 
     const rows = employeeRows.map((employee) => {
-      const completed = completedMap.get(employee.employeeId) || 0;
+      const applicableMandatory = applicableMandatoryIdsByEmployee.get(employee.employeeId);
+      const totalMandatory = applicableMandatory ? applicableMandatory.size : 0;
+      const completed = completedMap.get(employee.employeeId)?.size || 0;
       const compliance =
         totalMandatory === 0 ? 100 : Math.round((completed / totalMandatory) * 100);
       return {
@@ -3040,6 +3428,7 @@ export async function registerRoutes(
         .where(
           and(
             inArray(trainingEvents.ownerUnitId, scopeUnitIds),
+            trainingEventNotDeletedCondition(),
             eq(trainingEvents.workflowStatus, "submitted"),
           ),
         );
@@ -3049,6 +3438,7 @@ export async function registerRoutes(
         .where(
           and(
             inArray(trainingEvents.ownerUnitId, scopeUnitIds),
+            trainingEventNotDeletedCondition(),
             eq(trainingEvents.workflowStatus, "approved"),
           ),
         );
@@ -3058,13 +3448,14 @@ export async function registerRoutes(
         .where(
           and(
             inArray(trainingEvents.ownerUnitId, scopeUnitIds),
+            trainingEventNotDeletedCondition(),
             eq(trainingEvents.workflowStatus, "locked"),
           ),
         );
       const employeeRows = await db
         .select({ id: employees.id })
         .from(employees)
-        .where(inArray(employees.unitId, scopeUnitIds));
+        .where(and(inArray(employees.unitId, scopeUnitIds), employeeNotDeletedCondition()));
       const employeeIds = employeeRows.map((row) => row.id);
       const attendanceSubmitted =
         employeeIds.length === 0
@@ -3075,6 +3466,7 @@ export async function registerRoutes(
               .where(
                 and(
                   inArray(attendanceRecords.employeeId, employeeIds),
+                  attendanceNotDeletedCondition(),
                   eq(attendanceRecords.workflowStatus, "submitted"),
                 ),
               );
@@ -3087,6 +3479,7 @@ export async function registerRoutes(
               .where(
                 and(
                   inArray(attendanceRecords.employeeId, employeeIds),
+                  attendanceNotDeletedCondition(),
                   eq(attendanceRecords.workflowStatus, "approved"),
                 ),
               );
@@ -3099,6 +3492,7 @@ export async function registerRoutes(
               .where(
                 and(
                   inArray(attendanceRecords.employeeId, employeeIds),
+                  attendanceNotDeletedCondition(),
                   eq(attendanceRecords.workflowStatus, "locked"),
                 ),
               );
@@ -3171,5 +3565,11 @@ export async function registerRoutes(
   app.use("/api", api);
   return httpServer;
 }
+
+
+
+
+
+
 
 

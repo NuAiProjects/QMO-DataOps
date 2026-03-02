@@ -11,6 +11,8 @@ import Trainings from "@/pages/Trainings";
 import Attendance from "@/pages/Attendance";
 import Approvals from "@/pages/Approvals";
 import Reports from "@/pages/Reports";
+import Users from "@/pages/Users";
+import Audit from "@/pages/Audit";
 import DashboardLayout from "@/components/layout/DashboardLayout";
 import { FullScreenLoader } from "@/components/ui/loading-state";
 import { useUser } from "@/hooks/use-user";
@@ -69,6 +71,14 @@ function Router() {
 
       <Route path="/reports">
         {() => <ProtectedRoute component={Reports} />}
+      </Route>
+
+      <Route path="/users">
+        {() => <ProtectedRoute component={Users} />}
+      </Route>
+
+      <Route path="/audit">
+        {() => <ProtectedRoute component={Audit} />}
       </Route>
 
       <Route component={NotFound} />

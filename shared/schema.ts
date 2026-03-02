@@ -106,6 +106,21 @@ export const users = pgTable("users", {
     .defaultNow(),
 });
 
+export const userPasswordCredentials = pgTable("user_password_credentials", {
+  userId: uuid("user_id")
+    .primaryKey()
+    .references(() => users.id, { onDelete: "cascade" }),
+  passwordHash: text("password_hash").notNull(),
+  passwordAlgo: text("password_algo").notNull().default("scrypt_v1"),
+  createdAt: timestamp("created_at", { withTimezone: true })
+    .notNull()
+    .defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true })
+    .notNull()
+    .defaultNow(),
+  updatedBy: uuid("updated_by").references(() => users.id, { onDelete: "set null" }),
+});
+
 export const authIdentities = pgTable(
   "auth_identities",
   {
@@ -171,6 +186,9 @@ export const employees = pgTable("employees", {
     .notNull()
     .default("active"),
   hireDate: date("hire_date"),
+  deletedAt: timestamp("deleted_at", { withTimezone: true }),
+  deletedBy: uuid("deleted_by").references(() => users.id, { onDelete: "set null" }),
+  deleteReason: text("delete_reason"),
   createdAt: timestamp("created_at", { withTimezone: true })
     .notNull()
     .defaultNow(),
@@ -200,6 +218,9 @@ export const trainingEvents = pgTable("training_events", {
     .notNull()
     .default("draft"),
   returnNotes: text("return_notes"),
+  deletedAt: timestamp("deleted_at", { withTimezone: true }),
+  deletedBy: uuid("deleted_by").references(() => users.id, { onDelete: "set null" }),
+  deleteReason: text("delete_reason"),
   createdBy: uuid("created_by")
     .notNull()
     .references(() => users.id, { onDelete: "restrict" }),
@@ -251,6 +272,9 @@ export const attendanceRecords = pgTable(
       .notNull()
       .default("draft"),
     returnNotes: text("return_notes"),
+    deletedAt: timestamp("deleted_at", { withTimezone: true }),
+    deletedBy: uuid("deleted_by").references(() => users.id, { onDelete: "set null" }),
+    deleteReason: text("delete_reason"),
     createdBy: uuid("created_by")
       .notNull()
       .references(() => users.id, { onDelete: "restrict" }),
@@ -352,6 +376,7 @@ export type WorkflowEntityType = (typeof workflowEntityTypeEnum.enumValues)[numb
 export type WorkflowAction = (typeof workflowActionEnum.enumValues)[number];
 
 export type User = typeof users.$inferSelect;
+export type UserPasswordCredential = typeof userPasswordCredentials.$inferSelect;
 export type InsertUser = z.infer<typeof insertUserSchema>;
 export type NewUser = z.infer<typeof insertUserSchema>;
 export type Unit = typeof units.$inferSelect;

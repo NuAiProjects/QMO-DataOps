@@ -4,11 +4,18 @@ import connectPgSimple from "connect-pg-simple";
 import passport from "passport";
 import { Strategy as GoogleOIDCStrategy } from "passport-google-oidc";
 import { Issuer, Strategy as OpenIDConnectStrategy } from "openid-client";
-import { eq, ilike, inArray } from "drizzle-orm";
+import { randomBytes, scryptSync, timingSafeEqual } from "crypto";
+import { eq, ilike, inArray, sql } from "drizzle-orm";
 import { z } from "zod";
 import { db, pool } from "./db";
 import { getDevUser } from "./dev-auth";
-import { authIdentities, units, userUnits, users } from "@shared/schema";
+import {
+  authIdentities,
+  units,
+  userPasswordCredentials,
+  userUnits,
+  users,
+} from "@shared/schema";
 import { logAudit } from "./audit";
 
 const SESSION_SECRET = process.env.SESSION_SECRET;
@@ -24,48 +31,396 @@ const LOGIN_WINDOW_MS = Number(process.env.AUTH_LOGIN_WINDOW_MS || 10 * 60 * 100
 const LOGIN_MAX_ATTEMPTS = Number(process.env.AUTH_LOGIN_MAX_ATTEMPTS || 5);
 const AUTH_RATE_LIMIT_ENABLED =
   process.env.NODE_ENV === "production" || process.env.AUTH_LOGIN_RATE_LIMIT === "true";
+const AUTH_RATE_LIMIT_STORE = process.env.AUTH_LOGIN_RATE_LIMIT_STORE || "db";
+const USE_PERSISTENT_RATE_LIMIT = AUTH_RATE_LIMIT_STORE !== "memory";
+
+const LOCAL_AUTH_CREDENTIALS_JSON = process.env.LOCAL_AUTH_CREDENTIALS_JSON;
+const PASSWORD_MIN_LENGTH = Number(process.env.AUTH_PASSWORD_MIN_LENGTH || 10);
+const SCRYPT_N = 16384;
+const SCRYPT_R = 8;
+const SCRYPT_P = 1;
+const SCRYPT_KEYLEN = 64;
+const SCRYPT_ALGO_TAG = "scrypt_v1";
 
 type LoginAttemptState = {
   count: number;
   firstAttemptAt: number;
+  blockedUntil: number | null;
 };
 
 const loginAttempts = new Map<string, LoginAttemptState>();
+let rateLimitTableReady: Promise<void> | null = null;
+let passwordCredentialTableReady: Promise<void> | null = null;
+
+function normalizeLoginAlias(value: string) {
+  return value.trim().toLowerCase();
+}
+
+function toNullableEpoch(value: unknown) {
+  if (!value) return null;
+  const date = value instanceof Date ? value : new Date(String(value));
+  const epoch = date.getTime();
+  return Number.isNaN(epoch) ? null : epoch;
+}
+
+function parseLocalCredentials(raw: string | undefined) {
+  const credentials = new Map<string, string>();
+  if (!raw) return credentials;
+  try {
+    const parsed = JSON.parse(raw) as
+      | Record<string, string>
+      | Array<{ username?: string; password?: string; aliases?: string[] }>;
+
+    if (Array.isArray(parsed)) {
+      for (const entry of parsed) {
+        if (!entry?.username || !entry?.password) continue;
+        const password = String(entry.password).trim();
+        if (!password) continue;
+        credentials.set(normalizeLoginAlias(entry.username), password);
+        for (const alias of entry.aliases || []) {
+          credentials.set(normalizeLoginAlias(alias), password);
+        }
+      }
+      return credentials;
+    }
+
+    for (const [username, password] of Object.entries(parsed)) {
+      if (!username || !password) continue;
+      const normalizedPassword = String(password).trim();
+      if (!normalizedPassword) continue;
+      credentials.set(normalizeLoginAlias(username), normalizedPassword);
+    }
+  } catch (error) {
+    console.error("Failed to parse LOCAL_AUTH_CREDENTIALS_JSON", error);
+  }
+  return credentials;
+}
+
+const LOCAL_AUTH_CREDENTIALS = parseLocalCredentials(LOCAL_AUTH_CREDENTIALS_JSON);
+
+function getUserLoginAliases(email: string) {
+  const normalized = normalizeLoginAlias(email);
+  const prefix = normalized.split("@")[0] || normalized;
+  return [normalized, prefix];
+}
+
+function getSeedPasswordForUser(email: string) {
+  for (const alias of getUserLoginAliases(email)) {
+    const configured = LOCAL_AUTH_CREDENTIALS.get(alias);
+    if (configured) return configured;
+  }
+  return null;
+}
+
+function assertPasswordStrength(password: string) {
+  if (password.length < PASSWORD_MIN_LENGTH) {
+    throw new Error(`Password must be at least ${PASSWORD_MIN_LENGTH} characters.`);
+  }
+}
+
+function hashPassword(password: string) {
+  assertPasswordStrength(password);
+  const salt = randomBytes(16);
+  const hash = scryptSync(password, salt, SCRYPT_KEYLEN, {
+    N: SCRYPT_N,
+    r: SCRYPT_R,
+    p: SCRYPT_P,
+  });
+  return `${SCRYPT_ALGO_TAG}$${SCRYPT_N}$${SCRYPT_R}$${SCRYPT_P}$${salt.toString("base64")}$${hash.toString("base64")}`;
+}
+
+function verifyHashedPassword(password: string, encodedHash: string) {
+  const [algo, nStr, rStr, pStr, saltB64, hashB64] = encodedHash.split("$");
+  if (algo !== SCRYPT_ALGO_TAG || !nStr || !rStr || !pStr || !saltB64 || !hashB64) {
+    return false;
+  }
+  const n = Number(nStr);
+  const r = Number(rStr);
+  const p = Number(pStr);
+  if (!Number.isFinite(n) || !Number.isFinite(r) || !Number.isFinite(p)) {
+    return false;
+  }
+
+  const salt = Buffer.from(saltB64, "base64");
+  const expected = Buffer.from(hashB64, "base64");
+  const actual = scryptSync(password, salt, expected.length, {
+    N: n,
+    r,
+    p,
+  });
+  if (actual.length !== expected.length) return false;
+  return timingSafeEqual(actual, expected);
+}
+
+async function ensurePasswordCredentialTable() {
+  if (!passwordCredentialTableReady) {
+    passwordCredentialTableReady = db
+      .execute(sql`
+        create table if not exists user_password_credentials (
+          user_id uuid primary key references users(id) on delete cascade,
+          password_hash text not null,
+          password_algo text not null default 'scrypt_v1',
+          created_at timestamptz not null default now(),
+          updated_at timestamptz not null default now(),
+          updated_by uuid references users(id) on delete set null
+        )
+      `)
+      .then(() => undefined)
+      .catch((error) => {
+        passwordCredentialTableReady = null;
+        throw error;
+      });
+  }
+  await passwordCredentialTableReady;
+}
+
+export async function setUserPasswordCredential(params: {
+  userId: string;
+  plainPassword: string;
+  updatedByUserId?: string | null;
+}) {
+  await ensurePasswordCredentialTable();
+  const passwordHash = hashPassword(params.plainPassword);
+  await db
+    .insert(userPasswordCredentials)
+    .values({
+      userId: params.userId,
+      passwordHash,
+      passwordAlgo: SCRYPT_ALGO_TAG,
+      updatedBy: params.updatedByUserId ?? null,
+      updatedAt: new Date(),
+    })
+    .onConflictDoUpdate({
+      target: [userPasswordCredentials.userId],
+      set: {
+        passwordHash,
+        passwordAlgo: SCRYPT_ALGO_TAG,
+        updatedBy: params.updatedByUserId ?? null,
+        updatedAt: new Date(),
+      },
+    });
+}
+
+async function getUserPasswordHash(userId: string) {
+  await ensurePasswordCredentialTable();
+  const [credential] = await db
+    .select({ passwordHash: userPasswordCredentials.passwordHash })
+    .from(userPasswordCredentials)
+    .where(eq(userPasswordCredentials.userId, userId))
+    .limit(1);
+  return credential?.passwordHash || null;
+}
+
+async function hasAnyPasswordCredentials() {
+  await ensurePasswordCredentialTable();
+  const rows = await db
+    .select({ userId: userPasswordCredentials.userId })
+    .from(userPasswordCredentials)
+    .limit(1);
+  return rows.length > 0;
+}
+
+export async function getUserIdsWithPasswordCredentials(userIds: string[]) {
+  if (userIds.length === 0) return new Set<string>();
+  await ensurePasswordCredentialTable();
+  const rows = await db
+    .select({ userId: userPasswordCredentials.userId })
+    .from(userPasswordCredentials)
+    .where(inArray(userPasswordCredentials.userId, userIds));
+  return new Set(rows.map((row) => row.userId));
+}
+
+export async function verifyUserPasswordCredential(userId: string, plainPassword: string) {
+  const passwordHash = await getUserPasswordHash(userId);
+  if (!passwordHash) return false;
+  return verifyHashedPassword(plainPassword, passwordHash);
+}
+
+async function seedPasswordCredentialsFromEnv() {
+  if (LOCAL_AUTH_CREDENTIALS.size === 0) return;
+  await ensurePasswordCredentialTable();
+  const allUsers = await db.select().from(users);
+  for (const user of allUsers) {
+    const seedPassword = getSeedPasswordForUser(user.email);
+    if (!seedPassword) continue;
+    const existing = await getUserPasswordHash(user.id);
+    if (existing) continue;
+    await setUserPasswordCredential({
+      userId: user.id,
+      plainPassword: seedPassword,
+      updatedByUserId: user.id,
+    });
+  }
+}
 
 function getLoginAttemptKey(req: Request, username: string) {
   const ip = req.ip || "unknown";
   return `${ip}::${username.toLowerCase()}`;
 }
 
+async function ensureLoginRateLimitTable() {
+  if (!USE_PERSISTENT_RATE_LIMIT) return;
+  if (!rateLimitTableReady) {
+    rateLimitTableReady = db
+      .execute(sql`
+        create table if not exists auth_login_attempts (
+          attempt_key text primary key,
+          attempt_count integer not null,
+          first_attempt_at timestamptz not null,
+          blocked_until timestamptz,
+          updated_at timestamptz not null default now()
+        )
+      `)
+      .then(() => undefined)
+      .catch((error) => {
+        rateLimitTableReady = null;
+        throw error;
+      });
+  }
+  await rateLimitTableReady;
+}
+
+async function getPersistentLoginAttempt(key: string) {
+  await ensureLoginRateLimitTable();
+  const result = await db.execute(sql`
+    select attempt_count, first_attempt_at, blocked_until
+    from auth_login_attempts
+    where attempt_key = ${key}
+    limit 1
+  `);
+  const row = (result as any).rows?.[0] as
+    | {
+        attempt_count?: unknown;
+        first_attempt_at?: unknown;
+        blocked_until?: unknown;
+      }
+    | undefined;
+  if (!row) return null;
+  const firstAttemptAt = toNullableEpoch(row.first_attempt_at);
+  const attemptCount = Number(row.attempt_count);
+  if (!firstAttemptAt || !Number.isFinite(attemptCount)) return null;
+  return {
+    count: attemptCount,
+    firstAttemptAt,
+    blockedUntil: toNullableEpoch(row.blocked_until),
+  } satisfies LoginAttemptState;
+}
+
+async function setPersistentLoginAttempt(key: string, state: LoginAttemptState) {
+  await ensureLoginRateLimitTable();
+  await db.execute(sql`
+    insert into auth_login_attempts (
+      attempt_key,
+      attempt_count,
+      first_attempt_at,
+      blocked_until,
+      updated_at
+    )
+    values (
+      ${key},
+      ${state.count},
+      ${new Date(state.firstAttemptAt)},
+      ${state.blockedUntil ? new Date(state.blockedUntil) : null},
+      now()
+    )
+    on conflict (attempt_key) do update
+      set attempt_count = excluded.attempt_count,
+          first_attempt_at = excluded.first_attempt_at,
+          blocked_until = excluded.blocked_until,
+          updated_at = now()
+  `);
+}
+
+async function clearPersistentLoginAttempt(key: string) {
+  await ensureLoginRateLimitTable();
+  await db.execute(sql`
+    delete from auth_login_attempts
+    where attempt_key = ${key}
+  `);
+}
+
+async function pruneExpiredPersistentLoginAttempts(now = Date.now()) {
+  await ensureLoginRateLimitTable();
+  const oldWindow = new Date(now - LOGIN_WINDOW_MS * 2);
+  const oldBlock = new Date(now - LOGIN_WINDOW_MS);
+  await db.execute(sql`
+    delete from auth_login_attempts
+    where
+      (blocked_until is null and first_attempt_at < ${oldWindow})
+      or
+      (blocked_until is not null and blocked_until < ${oldBlock})
+  `);
+}
+
 function pruneExpiredLoginAttempts(now = Date.now()) {
   for (const [key, value] of loginAttempts.entries()) {
-    if (now - value.firstAttemptAt > LOGIN_WINDOW_MS) {
+    const blockedExpired = !value.blockedUntil || value.blockedUntil <= now;
+    if (now - value.firstAttemptAt > LOGIN_WINDOW_MS && blockedExpired) {
       loginAttempts.delete(key);
     }
   }
 }
 
-function getRemainingBlockMs(key: string, now = Date.now()) {
-  const attempts = loginAttempts.get(key);
-  if (!attempts || attempts.count < LOGIN_MAX_ATTEMPTS) return 0;
-  const elapsed = now - attempts.firstAttemptAt;
-  if (elapsed >= LOGIN_WINDOW_MS) {
-    loginAttempts.delete(key);
-    return 0;
+async function getLoginAttemptState(key: string) {
+  if (USE_PERSISTENT_RATE_LIMIT) {
+    return getPersistentLoginAttempt(key);
   }
-  return LOGIN_WINDOW_MS - elapsed;
+  return loginAttempts.get(key) || null;
 }
 
-function recordFailedLoginAttempt(key: string, now = Date.now()) {
-  const existing = loginAttempts.get(key);
-  if (!existing || now - existing.firstAttemptAt > LOGIN_WINDOW_MS) {
-    loginAttempts.set(key, { count: 1, firstAttemptAt: now });
+async function setLoginAttemptState(key: string, state: LoginAttemptState) {
+  if (USE_PERSISTENT_RATE_LIMIT) {
+    await setPersistentLoginAttempt(key, state);
     return;
   }
-  loginAttempts.set(key, { ...existing, count: existing.count + 1 });
+  loginAttempts.set(key, state);
 }
 
-function clearLoginAttempts(key: string) {
+async function getRemainingBlockMs(key: string, now = Date.now()) {
+  const attempts = await getLoginAttemptState(key);
+  if (!attempts) return 0;
+
+  if (attempts.blockedUntil && attempts.blockedUntil > now) {
+    return attempts.blockedUntil - now;
+  }
+
+  const elapsed = now - attempts.firstAttemptAt;
+  if (elapsed >= LOGIN_WINDOW_MS) {
+    await clearLoginAttempts(key);
+    return 0;
+  }
+
+  if (attempts.count < LOGIN_MAX_ATTEMPTS) return 0;
+
+  const remaining = LOGIN_WINDOW_MS - elapsed;
+  if (remaining <= 0) {
+    await clearLoginAttempts(key);
+    return 0;
+  }
+  return remaining;
+}
+
+async function recordFailedLoginAttempt(key: string, now = Date.now()) {
+  const existing = await getLoginAttemptState(key);
+  const isExpired = !existing || now - existing.firstAttemptAt > LOGIN_WINDOW_MS;
+
+  const nextCount = isExpired ? 1 : existing.count + 1;
+  const nextFirstAttemptAt = isExpired ? now : existing.firstAttemptAt;
+  const shouldBlock = nextCount >= LOGIN_MAX_ATTEMPTS;
+  const blockedUntil = shouldBlock ? now + LOGIN_WINDOW_MS : null;
+
+  await setLoginAttemptState(key, {
+    count: nextCount,
+    firstAttemptAt: nextFirstAttemptAt,
+    blockedUntil,
+  });
+}
+
+async function clearLoginAttempts(key: string) {
+  if (USE_PERSISTENT_RATE_LIMIT) {
+    await clearPersistentLoginAttempt(key);
+    return;
+  }
   loginAttempts.delete(key);
 }
 
@@ -135,6 +490,21 @@ async function upsertAuthIdentity(params: {
 
 export async function configureAuth(app: Express) {
   const PgStore = connectPgSimple(session);
+  try {
+    await ensurePasswordCredentialTable();
+    await seedPasswordCredentialsFromEnv();
+  } catch (error) {
+    console.error("Failed to initialize password credential store.", error);
+    throw error;
+  }
+  if (AUTH_RATE_LIMIT_ENABLED && USE_PERSISTENT_RATE_LIMIT) {
+    try {
+      await ensureLoginRateLimitTable();
+    } catch (error) {
+      console.error("Failed to initialize persistent login rate-limit store.", error);
+      throw error;
+    }
+  }
 
   app.set("trust proxy", 1);
   app.use(
@@ -328,7 +698,15 @@ export async function configureAuth(app: Express) {
     },
   );
 
-  const simpleAuthPassword = process.env.SIMPLE_AUTH_PASSWORD;
+  app.get("/api/auth/providers", async (_req: Request, res: Response) => {
+    res.setHeader("Cache-Control", "no-store");
+    const passwordEnabled = await hasAnyPasswordCredentials();
+    res.json({
+      google: Boolean(googleClientId && googleClientSecret),
+      microsoft: microsoftSsoEnabled,
+      password: passwordEnabled,
+    });
+  });
 
   app.post("/api/auth/login/password", async (req: Request, res: Response, next: NextFunction) => {
     const parsed = z
@@ -342,17 +720,24 @@ export async function configureAuth(app: Express) {
       return res.status(400).json({ message: "Username and password are required." });
     }
 
-    if (!simpleAuthPassword) {
+    if (!(await hasAnyPasswordCredentials())) {
       return res.status(503).json({
-        message: "Simple authentication is not configured on the server.",
+        message: "Password login is not configured.",
       });
     }
 
     const username = parsed.data.username.toLowerCase();
     const attemptKey = getLoginAttemptKey(req, username);
     if (AUTH_RATE_LIMIT_ENABLED) {
-      pruneExpiredLoginAttempts();
-      const remainingBlockMs = getRemainingBlockMs(attemptKey);
+      if (USE_PERSISTENT_RATE_LIMIT && Math.random() < 0.05) {
+        void pruneExpiredPersistentLoginAttempts().catch((error) => {
+          console.error("Failed to prune persistent login attempts", error);
+        });
+      } else {
+        pruneExpiredLoginAttempts();
+      }
+
+      const remainingBlockMs = await getRemainingBlockMs(attemptKey);
       if (remainingBlockMs > 0) {
         const retryAfterSeconds = Math.max(1, Math.ceil(remainingBlockMs / 1000));
         res.setHeader("Retry-After", retryAfterSeconds.toString());
@@ -365,7 +750,7 @@ export async function configureAuth(app: Express) {
     const user = await findUserByUsername(username);
     if (!user || !user.isActive) {
       if (AUTH_RATE_LIMIT_ENABLED) {
-        recordFailedLoginAttempt(attemptKey);
+        await recordFailedLoginAttempt(attemptKey);
       }
       await logAudit({
         actorUserId: null,
@@ -381,13 +766,11 @@ export async function configureAuth(app: Express) {
     }
 
     const submittedPassword = parsed.data.password.trim();
-    const configuredPassword = simpleAuthPassword.trim();
-    const strictFlag = process.env.SIMPLE_AUTH_STRICT;
-    const isStrictPasswordCheck =
-      process.env.NODE_ENV === "production" || strictFlag === "true";
-    if (submittedPassword !== configuredPassword && isStrictPasswordCheck) {
+    const passwordMatches = await verifyUserPasswordCredential(user.id, submittedPassword);
+
+    if (!passwordMatches) {
       if (AUTH_RATE_LIMIT_ENABLED) {
-        recordFailedLoginAttempt(attemptKey);
+        await recordFailedLoginAttempt(attemptKey);
       }
       await logAudit({
         actorUserId: user.id,
@@ -407,7 +790,9 @@ export async function configureAuth(app: Express) {
 
       req.login(user, (err) => {
         if (err) return next(err);
-        clearLoginAttempts(attemptKey);
+        void clearLoginAttempts(attemptKey).catch((clearError) => {
+          console.error("Failed to clear login attempts", clearError);
+        });
         void logAudit({
           actorUserId: user.id,
           action: "auth.login.success",

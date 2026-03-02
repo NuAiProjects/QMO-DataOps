@@ -49,6 +49,9 @@ import { useToast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
 import { LoadingState } from "@/components/ui/loading-state";
 import { Spinner } from "@/components/ui/spinner";
+import { Checkbox } from "@/components/ui/checkbox";
+import EvidenceManager from "@/components/evidence/EvidenceManager";
+import { Textarea } from "@/components/ui/textarea";
 
 type AttendanceRow = {
   id: string;
@@ -68,11 +71,17 @@ export default function Attendance() {
   const [importRows, setImportRows] = useState<any[]>([]);
   const [decisionMap, setDecisionMap] = useState<Record<string, "skip" | "update">>({});
   const [resolveMap, setResolveMap] = useState<Record<string, string>>({});
+  const [invalidResolveMap, setInvalidResolveMap] = useState<Record<string, boolean>>({});
   const [uploading, setUploading] = useState(false);
   const [submittingAll, setSubmittingAll] = useState(false);
   const csvFileInputRef = useRef<HTMLInputElement | null>(null);
   const [employeePickerOpen, setEmployeePickerOpen] = useState(false);
   const [manualOpen, setManualOpen] = useState(false);
+  const [evidenceDialogOpen, setEvidenceDialogOpen] = useState(false);
+  const [evidenceRow, setEvidenceRow] = useState<AttendanceRow | null>(null);
+  const [archiveDialogOpen, setArchiveDialogOpen] = useState(false);
+  const [archiveRow, setArchiveRow] = useState<AttendanceRow | null>(null);
+  const [archiveReason, setArchiveReason] = useState("");
   const [manualForm, setManualForm] = useState({
     employeeId: "",
     attendanceDate: "",
@@ -115,6 +124,8 @@ export default function Attendance() {
     role,
   );
   const canBulkImport = ["encoder", "unit_head", "super_admin"].includes(role);
+  const canUploadEvidence = canManageAttendance;
+  const canDeleteEvidence = ["super_admin", "hr_qa_approver"].includes(role);
   const selectedManualEmployee = employees.find((emp: any) => emp.id === manualForm.employeeId);
 
   const employeeMap = useMemo(() => {
@@ -169,6 +180,7 @@ export default function Attendance() {
     setImportRows([]);
     setDecisionMap({});
     setResolveMap({});
+    setInvalidResolveMap({});
   }, [selectedEventId]);
 
   useEffect(() => {
@@ -200,6 +212,7 @@ export default function Attendance() {
       setImportRows(data.rows);
       setDecisionMap({});
       setResolveMap({});
+      setInvalidResolveMap({});
       toast({
         title: "CSV uploaded",
         description: "Review matched rows, resolve unmatched entries, then commit import.",
@@ -218,9 +231,14 @@ export default function Attendance() {
   const handleResolve = async () => {
     if (!canManageAttendance) return;
     if (!importBatch) return;
-    const resolutions = Object.entries(resolveMap).map(([rowId, employeeId]) => ({
+    const resolutionRowIds = new Set([
+      ...Object.keys(resolveMap),
+      ...Object.keys(invalidResolveMap).filter((rowId) => invalidResolveMap[rowId]),
+    ]);
+    const resolutions = Array.from(resolutionRowIds).map((rowId) => ({
       rowId,
-      employeeId,
+      employeeId: resolveMap[rowId],
+      markInvalid: invalidResolveMap[rowId] || false,
     }));
     if (resolutions.length === 0) return;
     const res = await apiRequest("POST", `/api/attendance/import/${importBatch.id}/resolve`, {
@@ -229,6 +247,7 @@ export default function Attendance() {
     const data = await res.json();
     setImportRows(data.rows);
     setResolveMap({});
+    setInvalidResolveMap({});
   };
 
   const handleCommit = async () => {
@@ -244,6 +263,8 @@ export default function Attendance() {
     setImportBatch(null);
     setImportRows([]);
     setDecisionMap({});
+    setResolveMap({});
+    setInvalidResolveMap({});
     await refetchAttendance();
   };
 
@@ -292,6 +313,17 @@ export default function Attendance() {
   const submitAttendance = async (attendanceId: string) => {
     await apiRequest("POST", `/api/attendance/${attendanceId}/submit`);
     await queryClient.invalidateQueries({ queryKey: ["/api/approvals"] });
+    await refetchAttendance();
+  };
+
+  const archiveAttendance = async () => {
+    if (!archiveRow) return;
+    await apiRequest("DELETE", `/api/attendance/${archiveRow.id}`, {
+      reason: archiveReason.trim(),
+    });
+    setArchiveDialogOpen(false);
+    setArchiveRow(null);
+    setArchiveReason("");
     await refetchAttendance();
   };
 
@@ -635,19 +667,43 @@ export default function Attendance() {
                             <TableCell>
                               <Badge variant="outline">{row.workflowStatus}</Badge>
                             </TableCell>
-                            <TableCell>
-                              {canSubmit && ["draft", "returned"].includes(row.workflowStatus) ? (
+                                                        <TableCell>
+                              <div className="flex items-center gap-2">
+                                {canSubmit && ["draft", "returned"].includes(row.workflowStatus) ? (
+                                  <Button
+                                    variant="outline"
+                                    size="sm"
+                                    disabled={submittingAll}
+                                    onClick={() => submitAttendance(row.id)}
+                                  >
+                                    Submit
+                                  </Button>
+                                ) : null}
                                 <Button
                                   variant="outline"
                                   size="sm"
-                                  disabled={submittingAll}
-                                  onClick={() => submitAttendance(row.id)}
+                                  onClick={() => {
+                                    setEvidenceRow(row);
+                                    setEvidenceDialogOpen(true);
+                                  }}
                                 >
-                                  Submit
+                                  Evidence
                                 </Button>
-                              ) : (
-                                <span className="text-muted-foreground">—</span>
-                              )}
+                                {canManageAttendance ? (
+                                  <Button
+                                    variant="outline"
+                                    size="sm"
+                                    className="text-destructive"
+                                    onClick={() => {
+                                      setArchiveRow(row);
+                                      setArchiveReason("");
+                                      setArchiveDialogOpen(true);
+                                    }}
+                                  >
+                                    Archive
+                                  </Button>
+                                ) : null}
+                              </div>
                             </TableCell>
                           </TableRow>
                         );
@@ -703,25 +759,40 @@ export default function Attendance() {
                                 </TableCell>
                                 <TableCell>
                                   {row.matchStatus === "unmatched" ? (
-                                    <Select
-                                      value={resolveMap[row.id] || ""}
-                                      onValueChange={(value) =>
-                                        setResolveMap((prev) => ({ ...prev, [row.id]: value }))
-                                      }
-                                    >
-                                      <SelectTrigger>
-                                        <SelectValue placeholder="Match employee" />
-                                      </SelectTrigger>
-                                      <SelectContent>
-                                        {employees.map((emp: any) => (
-                                          <SelectItem key={emp.id} value={emp.id}>
-                                            {emp.employeeNo} · {emp.fullName}
-                                          </SelectItem>
-                                        ))}
-                                      </SelectContent>
-                                    </Select>
+                                    <div className="space-y-2">
+                                      <Select
+                                        value={resolveMap[row.id] || ""}
+                                        onValueChange={(value) =>
+                                          setResolveMap((prev) => ({ ...prev, [row.id]: value }))
+                                        }
+                                        disabled={invalidResolveMap[row.id] === true}
+                                      >
+                                        <SelectTrigger>
+                                          <SelectValue placeholder="Match employee" />
+                                        </SelectTrigger>
+                                        <SelectContent>
+                                          {employees.map((emp: any) => (
+                                            <SelectItem key={emp.id} value={emp.id}>
+                                              {emp.employeeNo} - {emp.fullName}
+                                            </SelectItem>
+                                          ))}
+                                        </SelectContent>
+                                      </Select>
+                                      <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                                        <Checkbox
+                                          checked={invalidResolveMap[row.id] === true}
+                                          onCheckedChange={(checked) =>
+                                            setInvalidResolveMap((prev) => ({
+                                              ...prev,
+                                              [row.id]: checked === true,
+                                            }))
+                                          }
+                                        />
+                                        Mark as invalid
+                                      </label>
+                                    </div>
                                   ) : (
-                                    <span className="text-muted-foreground">—</span>
+                                    <span className="text-muted-foreground">-</span>
                                   )}
                                 </TableCell>
                                 <TableCell>
@@ -765,7 +836,48 @@ export default function Attendance() {
           </CardContent>
         </Card>
       </div>
+
+      <Dialog open={evidenceDialogOpen} onOpenChange={setEvidenceDialogOpen}>
+        <DialogContent className="max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>Attendance Evidence</DialogTitle>
+            <DialogDescription>Upload and manage attendance proof documents.</DialogDescription>
+          </DialogHeader>
+          <EvidenceManager
+            entityType="attendance_record"
+            entityId={evidenceRow?.id}
+            canUpload={canUploadEvidence}
+            canDelete={canDeleteEvidence}
+          />
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={archiveDialogOpen} onOpenChange={setArchiveDialogOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Archive Attendance Record</DialogTitle>
+            <DialogDescription>
+              Provide a reason before archiving this attendance record.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3">
+            <Textarea
+              placeholder="Reason for archive"
+              value={archiveReason}
+              onChange={(event) => setArchiveReason(event.target.value)}
+            />
+            <Button
+              variant="destructive"
+              disabled={archiveReason.trim().length < 3}
+              onClick={archiveAttendance}
+            >
+              Archive Record
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
+
 

@@ -1,7 +1,7 @@
 import "dotenv/config";
 import { drizzle } from "drizzle-orm/node-postgres";
 import { Pool } from "pg";
-import { eq } from "drizzle-orm";
+import { randomBytes, scryptSync } from "crypto";
 import {
   attachments,
   attendanceRecords,
@@ -15,7 +15,23 @@ import {
   userUnits,
   workflowActions,
   users,
+  userPasswordCredentials,
 } from "../shared/schema";
+
+const SCRYPT_N = 16384;
+const SCRYPT_R = 8;
+const SCRYPT_P = 1;
+const SCRYPT_KEYLEN = 64;
+
+function hashPassword(password: string) {
+  const salt = randomBytes(16);
+  const hash = scryptSync(password, salt, SCRYPT_KEYLEN, {
+    N: SCRYPT_N,
+    r: SCRYPT_R,
+    p: SCRYPT_P,
+  });
+  return `scrypt_v1$${SCRYPT_N}$${SCRYPT_R}$${SCRYPT_P}$${salt.toString("base64")}$${hash.toString("base64")}`;
+}
 
 async function seed() {
   const databaseUrl = process.env.DATABASE_URL;
@@ -43,6 +59,7 @@ async function seed() {
   await db.delete(workflowActions);
   await db.delete(auditLogs);
   await db.delete(userUnits);
+  await db.delete(userPasswordCredentials);
   await db.delete(attachments);
   await db.delete(attendanceRecords);
   await db.delete(trainingEvents);
@@ -122,6 +139,39 @@ async function seed() {
     { userId: viewer.id, unitId: acadDept.id },
   ]);
 
+  await db.insert(userPasswordCredentials).values([
+    {
+      userId: superAdmin.id,
+      passwordHash: hashPassword("Admin@12345"),
+      passwordAlgo: "scrypt_v1",
+      updatedBy: superAdmin.id,
+    },
+    {
+      userId: hrqa.id,
+      passwordHash: hashPassword("User@12345"),
+      passwordAlgo: "scrypt_v1",
+      updatedBy: superAdmin.id,
+    },
+    {
+      userId: unitHead.id,
+      passwordHash: hashPassword("User@12345"),
+      passwordAlgo: "scrypt_v1",
+      updatedBy: superAdmin.id,
+    },
+    {
+      userId: encoder.id,
+      passwordHash: hashPassword("User@12345"),
+      passwordAlgo: "scrypt_v1",
+      updatedBy: superAdmin.id,
+    },
+    {
+      userId: viewer.id,
+      passwordHash: hashPassword("User@12345"),
+      passwordAlgo: "scrypt_v1",
+      updatedBy: superAdmin.id,
+    },
+  ]);
+
   const employeeValues = Array.from({ length: 20 }).map((_, index) => {
     const employeeNo = `EMP-${1001 + index}`;
     const fullName = `Employee ${index + 1}`;
@@ -139,7 +189,7 @@ async function seed() {
       email: `employee${index + 1}@qmo.local`,
       unitId,
       position: index % 2 === 0 ? "Staff" : "Supervisor",
-      employmentStatus: index % 7 === 0 ? "inactive" : "active",
+      employmentStatus: (index % 7 === 0 ? "inactive" : "active") as "active" | "inactive",
       hireDate: "2021-01-15",
     };
   });
@@ -304,16 +354,6 @@ async function seed() {
       },
     ])
     .returning();
-
-  await db
-    .update(attendanceRecords)
-    .set({ certificateAttachmentId: certOne.id })
-    .where(eq(attendanceRecords.id, attendanceSeed[0].id));
-
-  await db
-    .update(attendanceRecords)
-    .set({ certificateAttachmentId: certTwo.id })
-    .where(eq(attendanceRecords.id, attendanceSeed[2].id));
 
   await pool.end();
 }
