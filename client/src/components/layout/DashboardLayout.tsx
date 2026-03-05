@@ -156,7 +156,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
       label: "Users",
       href: "/users",
       icon: Users,
-      roles: ["super_admin", "hr_qa_approver", "unit_head", "encoder", "viewer_auditor"],
+      roles: ["super_admin"],
     },
     {
       label: "Audit",

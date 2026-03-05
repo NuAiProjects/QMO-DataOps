@@ -33,7 +33,6 @@ type ReportFilters = {
   from: string;
   to: string;
   unitId: string;
-  includeChildren: boolean;
 };
 
 type ReportPagination = {
@@ -53,7 +52,6 @@ const buildQuery = (filters: ReportFilters) => {
   if (filters.from) params.set("from", filters.from);
   if (filters.to) params.set("to", filters.to);
   if (filters.unitId) params.set("unitId", filters.unitId);
-  if (filters.includeChildren) params.set("includeChildren", "true");
   return params.toString();
 };
 
@@ -76,24 +74,17 @@ export default function Reports() {
     from: "",
     to: "",
     unitId: "",
-    includeChildren: true,
   });
   const [employeePage, setEmployeePage] = useState(1);
   const [unitPage, setUnitPage] = useState(1);
-  const [compliancePage, setCompliancePage] = useState(1);
 
   const baseQuery = useMemo(() => buildQuery(filters), [filters]);
   const employeeQuery = useMemo(() => withPage(baseQuery, employeePage), [baseQuery, employeePage]);
   const unitQuery = useMemo(() => withPage(baseQuery, unitPage), [baseQuery, unitPage]);
-  const complianceQuery = useMemo(
-    () => withPage(baseQuery, compliancePage),
-    [baseQuery, compliancePage],
-  );
 
   useEffect(() => {
     setEmployeePage(1);
     setUnitPage(1);
-    setCompliancePage(1);
   }, [baseQuery]);
 
   const { data: unitData, isLoading: unitsLoading } = useQuery({
@@ -118,15 +109,6 @@ export default function Reports() {
     queryKey: ["/api/reports/hours-by-unit", unitQuery],
     queryFn: () => fetchReport("/api/reports/hours-by-unit", unitQuery),
   });
-  const {
-    data: compliance,
-    isLoading: complianceLoading,
-    isFetching: complianceFetching,
-  } = useQuery<ReportResponse<any>>({
-    queryKey: ["/api/reports/compliance", complianceQuery],
-    queryFn: () => fetchReport("/api/reports/compliance", complianceQuery),
-  });
-
   const handleExport = (endpoint: string) => {
     const exportQuery = `${baseQuery}${baseQuery ? "&" : ""}format=csv`;
     window.open(`${endpoint}?${exportQuery}`, "_blank");
@@ -142,10 +124,8 @@ export default function Reports() {
     return `Showing ${start}-${end} of ${pagination.total}`;
   };
 
-  const isPageLoading =
-    unitsLoading || hoursByEmployeeLoading || hoursByUnitLoading || complianceLoading;
-  const isRefreshing =
-    hoursByEmployeeFetching || hoursByUnitFetching || complianceFetching;
+  const isPageLoading = unitsLoading || hoursByEmployeeLoading || hoursByUnitLoading;
+  const isRefreshing = hoursByEmployeeFetching || hoursByUnitFetching;
 
   if (isPageLoading) {
     return <LoadingState label="Loading reports..." className="min-h-[520px]" />;
@@ -169,7 +149,7 @@ export default function Reports() {
           <CardTitle>Report Filters</CardTitle>
           <CardDescription>Apply filters to all reports below.</CardDescription>
         </CardHeader>
-        <CardContent className="grid gap-4 md:grid-cols-4">
+        <CardContent className="grid gap-4 md:grid-cols-3">
           <div className="space-y-2">
             <label className="text-sm font-medium">From</label>
             <Input
@@ -204,23 +184,6 @@ export default function Reports() {
                     {unit.name}
                   </SelectItem>
                 ))}
-              </SelectContent>
-            </Select>
-          </div>
-          <div className="space-y-2">
-            <label className="text-sm font-medium">Include Children</label>
-            <Select
-              value={filters.includeChildren ? "true" : "false"}
-              onValueChange={(value) =>
-                setFilters((prev) => ({ ...prev, includeChildren: value === "true" }))
-              }
-            >
-              <SelectTrigger>
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="true">Yes</SelectItem>
-                <SelectItem value="false">No</SelectItem>
               </SelectContent>
             </Select>
           </div>
@@ -347,68 +310,6 @@ export default function Reports() {
         </CardContent>
       </Card>
 
-      <Card className="border-border/60">
-        <CardHeader className="flex flex-row items-center justify-between">
-          <div>
-            <CardTitle>Mandatory Compliance</CardTitle>
-            <CardDescription>Completion status for mandatory trainings.</CardDescription>
-          </div>
-          <Button variant="outline" onClick={() => handleExport("/api/reports/compliance")}>
-            <Download className="mr-2 h-4 w-4" />
-            Export CSV
-          </Button>
-        </CardHeader>
-        <CardContent>
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>Employee</TableHead>
-                <TableHead>Completed</TableHead>
-                <TableHead>Total Mandatory</TableHead>
-                <TableHead>Compliance %</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {(compliance?.rows ?? []).map((row: any) => (
-                <TableRow key={row.employeeId}>
-                  <TableCell>{row.fullName}</TableCell>
-                  <TableCell>{row.completedMandatory}</TableCell>
-                  <TableCell>{row.totalMandatory}</TableCell>
-                  <TableCell>{row.compliancePercent}</TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-          <div className="mt-4 flex items-center justify-between text-sm text-muted-foreground">
-            <span>{getPaginationLabel(compliance)}</span>
-            <div className="flex items-center gap-2">
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => setCompliancePage((prev) => Math.max(1, prev - 1))}
-                disabled={(compliance?.pagination?.page ?? compliancePage) <= 1}
-              >
-                Previous
-              </Button>
-              <span>
-                Page {compliance?.pagination?.page ?? compliancePage} of{" "}
-                {compliance?.pagination?.totalPages ?? 1}
-              </span>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => setCompliancePage((prev) => prev + 1)}
-                disabled={
-                  (compliance?.pagination?.page ?? compliancePage) >=
-                  (compliance?.pagination?.totalPages ?? 1)
-                }
-              >
-                Next
-              </Button>
-            </div>
-          </div>
-        </CardContent>
-      </Card>
     </div>
   );
 }

@@ -7,7 +7,6 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { LoadingState } from "@/components/ui/loading-state";
 import { Spinner } from "@/components/ui/spinner";
-import EvidenceManager from "@/components/evidence/EvidenceManager";
 import { Textarea } from "@/components/ui/textarea";
 import {
   Table,
@@ -198,8 +197,6 @@ export default function Employees() {
     user?.role === "hr_qa_approver" ||
     user?.role === "unit_head" ||
     user?.role === "encoder";
-  const canUploadEvidence = canEdit;
-  const canDeleteEvidence = user?.role === "super_admin" || user?.role === "hr_qa_approver";
 
   const unitMap = useMemo(() => {
     const map = new Map<string, string>();
@@ -726,7 +723,7 @@ export default function Employees() {
             <TableRow className="bg-muted/50">
               <TableHead>Name</TableHead>
               <TableHead>Department</TableHead>
-              <TableHead>Position</TableHead>
+              <TableHead>Position/Division</TableHead>
               <TableHead>Status</TableHead>
               <TableHead className="text-right">Actions</TableHead>
             </TableRow>
@@ -912,16 +909,6 @@ export default function Employees() {
                     </Table>
                   </div>
                 )}
-              </div>
-
-              <div className="rounded-md border p-4 space-y-3">
-                <h3 className="text-base font-semibold">Evidence Files</h3>
-                <EvidenceManager
-                  entityType="employee"
-                  entityId={selectedEmployee.id}
-                  canUpload={canUploadEvidence}
-                  canDelete={canDeleteEvidence}
-                />
               </div>
             </div>
           ) : null}

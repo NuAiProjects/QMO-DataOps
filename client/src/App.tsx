@@ -17,7 +17,13 @@ import DashboardLayout from "@/components/layout/DashboardLayout";
 import { FullScreenLoader } from "@/components/ui/loading-state";
 import { useUser } from "@/hooks/use-user";
 
-function ProtectedRoute({ component: Component }: { component: React.ComponentType }) {
+function ProtectedRoute({
+  component: Component,
+  allowedRoles,
+}: {
+  component: React.ComponentType;
+  allowedRoles?: string[];
+}) {
   const { user, isLoading } = useUser();
 
   if (isLoading) {
@@ -26,6 +32,10 @@ function ProtectedRoute({ component: Component }: { component: React.ComponentTy
 
   if (!user) {
     return <Redirect to="/login" />;
+  }
+
+  if (allowedRoles && !allowedRoles.includes(user.role)) {
+    return <Redirect to="/dashboard" />;
   }
 
   return (
@@ -74,7 +84,7 @@ function Router() {
       </Route>
 
       <Route path="/users">
-        {() => <ProtectedRoute component={Users} />}
+        {() => <ProtectedRoute component={Users} allowedRoles={["super_admin"]} />}
       </Route>
 
       <Route path="/audit">

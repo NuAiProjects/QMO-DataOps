@@ -204,6 +204,7 @@ export const trainingEvents = pgTable("training_events", {
   category: text("category"),
   deliveryMode: deliveryModeEnum("delivery_mode").notNull(),
   provider: text("provider"),
+  venue: text("venue"),
   startDate: date("start_date").notNull(),
   endDate: date("end_date").notNull(),
   hours: numeric("hours", { precision: 6, scale: 2 }).notNull(),

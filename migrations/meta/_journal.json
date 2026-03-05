@@ -15,6 +15,13 @@
       "when": 1762050000000,
       "tag": "0001_auth_and_soft_delete",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "5",
+      "when": 1762350000000,
+      "tag": "0002_training_event_venue",
+      "breakpoints": true
     }
   ]
 }

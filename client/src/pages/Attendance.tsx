@@ -50,7 +50,6 @@ import { cn } from "@/lib/utils";
 import { LoadingState } from "@/components/ui/loading-state";
 import { Spinner } from "@/components/ui/spinner";
 import { Checkbox } from "@/components/ui/checkbox";
-import EvidenceManager from "@/components/evidence/EvidenceManager";
 import { Textarea } from "@/components/ui/textarea";
 
 type AttendanceRow = {
@@ -77,8 +76,6 @@ export default function Attendance() {
   const csvFileInputRef = useRef<HTMLInputElement | null>(null);
   const [employeePickerOpen, setEmployeePickerOpen] = useState(false);
   const [manualOpen, setManualOpen] = useState(false);
-  const [evidenceDialogOpen, setEvidenceDialogOpen] = useState(false);
-  const [evidenceRow, setEvidenceRow] = useState<AttendanceRow | null>(null);
   const [archiveDialogOpen, setArchiveDialogOpen] = useState(false);
   const [archiveRow, setArchiveRow] = useState<AttendanceRow | null>(null);
   const [archiveReason, setArchiveReason] = useState("");
@@ -124,8 +121,6 @@ export default function Attendance() {
     role,
   );
   const canBulkImport = ["encoder", "unit_head", "super_admin"].includes(role);
-  const canUploadEvidence = canManageAttendance;
-  const canDeleteEvidence = ["super_admin", "hr_qa_approver"].includes(role);
   const selectedManualEmployee = employees.find((emp: any) => emp.id === manualForm.employeeId);
 
   const employeeMap = useMemo(() => {
@@ -679,16 +674,6 @@ export default function Attendance() {
                                     Submit
                                   </Button>
                                 ) : null}
-                                <Button
-                                  variant="outline"
-                                  size="sm"
-                                  onClick={() => {
-                                    setEvidenceRow(row);
-                                    setEvidenceDialogOpen(true);
-                                  }}
-                                >
-                                  Evidence
-                                </Button>
                                 {canManageAttendance ? (
                                   <Button
                                     variant="outline"
@@ -836,21 +821,6 @@ export default function Attendance() {
           </CardContent>
         </Card>
       </div>
-
-      <Dialog open={evidenceDialogOpen} onOpenChange={setEvidenceDialogOpen}>
-        <DialogContent className="max-w-2xl">
-          <DialogHeader>
-            <DialogTitle>Attendance Evidence</DialogTitle>
-            <DialogDescription>Upload and manage attendance proof documents.</DialogDescription>
-          </DialogHeader>
-          <EvidenceManager
-            entityType="attendance_record"
-            entityId={evidenceRow?.id}
-            canUpload={canUploadEvidence}
-            canDelete={canDeleteEvidence}
-          />
-        </DialogContent>
-      </Dialog>
 
       <Dialog open={archiveDialogOpen} onOpenChange={setArchiveDialogOpen}>
         <DialogContent>

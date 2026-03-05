@@ -37,7 +37,6 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import EvidenceManager from "@/components/evidence/EvidenceManager";
 import { Textarea } from "@/components/ui/textarea";
 
 type TrainingForm = {
@@ -46,6 +45,7 @@ type TrainingForm = {
   category: string;
   deliveryMode: string;
   provider: string;
+  venue: string;
   startDate: string;
   endDate: string;
   hours: string;
@@ -57,15 +57,30 @@ type TrainingForm = {
 const emptyForm: TrainingForm = {
   title: "",
   description: "",
-  category: "",
+  category: "internal",
   deliveryMode: "in_person",
   provider: "",
+  venue: "",
   startDate: "",
   endDate: "",
   hours: "0",
   ownerUnitId: "",
   visibilityScope: "unit",
   isMandatory: false,
+};
+
+const normalizeCategory = (value: unknown): "internal" | "external" => {
+  const normalized = typeof value === "string" ? value.trim().toLowerCase() : "";
+  return normalized === "external" ? "external" : "internal";
+};
+
+const formatCategoryLabel = (value: unknown): string => {
+  if (typeof value !== "string") return "";
+  const normalized = value.trim();
+  if (!normalized) return "";
+  if (normalized.toLowerCase() === "internal") return "Internal";
+  if (normalized.toLowerCase() === "external") return "External";
+  return normalized;
 };
 
 export default function Trainings() {
@@ -82,10 +97,6 @@ export default function Trainings() {
 
   const canCreate = user?.role !== "viewer_auditor";
   const canSubmit = ["encoder", "unit_head", "super_admin"].includes(user?.role || "");
-  const canUploadEvidence = ["encoder", "unit_head", "hr_qa_approver", "super_admin"].includes(
-    user?.role || "",
-  );
-  const canDeleteEvidence = ["hr_qa_approver", "super_admin"].includes(user?.role || "");
 
   const { data, isLoading: trainingsLoading } = useQuery({
     queryKey: ["/api/training-events"],
@@ -95,9 +106,32 @@ export default function Trainings() {
     queryKey: ["/api/units"],
     queryFn: getQueryFn({ on401: "throw" }),
   });
+  const { data: employeeData, isLoading: employeesLoading } = useQuery({
+    queryKey: ["/api/employees"],
+    queryFn: getQueryFn({ on401: "throw" }),
+  });
 
   const events = data?.trainingEvents ?? [];
   const units = unitData?.units ?? [];
+  const employees = employeeData?.employees ?? [];
+  const unitNameById = useMemo(() => {
+    return new Map(units.map((unit: any) => [unit.id, unit.name]));
+  }, [units]);
+  const internalProviderOptions = useMemo(() => {
+    const names = new Set<string>();
+    for (const employee of employees) {
+      const unitName = unitNameById.get(employee.unitId);
+      if (typeof unitName === "string" && unitName.trim().length > 0) {
+        names.add(unitName);
+      }
+    }
+    return Array.from(names).sort((a, b) => a.localeCompare(b));
+  }, [employees, unitNameById]);
+  const providerOptions = useMemo(() => {
+    if (!form.provider) return internalProviderOptions;
+    if (internalProviderOptions.includes(form.provider)) return internalProviderOptions;
+    return [form.provider, ...internalProviderOptions];
+  }, [internalProviderOptions, form.provider]);
   const filtered = useMemo(() => {
     if (filter === "All") return events;
     return events.filter((event: any) => {
@@ -108,7 +142,7 @@ export default function Trainings() {
       return true;
     });
   }, [events, filter]);
-  const isPageLoading = trainingsLoading || unitsLoading;
+  const isPageLoading = trainingsLoading || unitsLoading || employeesLoading;
 
   useEffect(() => {
     if (!form.ownerUnitId && units.length > 0) {
@@ -124,9 +158,10 @@ export default function Trainings() {
   const mapEventToForm = (event: any): TrainingForm => ({
     title: event.title || "",
     description: event.description || "",
-    category: event.category || "",
+    category: normalizeCategory(event.category),
     deliveryMode: event.deliveryMode || "in_person",
     provider: event.provider || "",
+    venue: event.venue || "",
     startDate: event.startDate || "",
     endDate: event.endDate || "",
     hours: String(event.hours ?? "0"),
@@ -168,7 +203,18 @@ export default function Trainings() {
       return;
     }
     if (!ownerUnitId) {
-      toast({ variant: "destructive", title: "Select an owner unit." });
+      toast({ variant: "destructive", title: "No owner unit available for your account." });
+      return;
+    }
+    const provider = form.provider.trim();
+    if (!provider) {
+      toast({
+        variant: "destructive",
+        title:
+          form.category === "external"
+            ? "External provider is required."
+            : "Select an internal provider.",
+      });
       return;
     }
     const hours = Number(form.hours);
@@ -179,13 +225,18 @@ export default function Trainings() {
 
     try {
       const payload = {
-        ...form,
         title: form.title.trim(),
         description: form.description?.trim() || null,
-        category: form.category?.trim() || null,
-        provider: form.provider?.trim() || null,
+        category: form.category,
+        deliveryMode: form.deliveryMode,
+        provider,
+        venue: form.venue?.trim() || null,
+        startDate: form.startDate,
+        endDate: form.endDate,
         hours,
         ownerUnitId,
+        visibilityScope: form.visibilityScope,
+        isMandatory: form.isMandatory,
       };
       if (editingEventId) {
         await apiRequest("PUT", `/api/training-events/${editingEventId}`, payload);
@@ -254,14 +305,16 @@ export default function Trainings() {
             <DialogTrigger asChild>
               <Button className="shadow-md" onClick={openCreateDialog}>
                 <Plus className="mr-2 h-4 w-4" />
-                Create Event
+                Create Training/Workshop
               </Button>
             </DialogTrigger>
             <DialogContent>
               <DialogHeader>
-                <DialogTitle>{editingEventId ? "Edit Training Event" : "New Training Event"}</DialogTitle>
+                <DialogTitle>
+                  {editingEventId ? "Edit Training/Workshop" : "New Training/Workshop"}
+                </DialogTitle>
                 <DialogDescription className="sr-only">
-                  Create or update a training event for your unit.
+                  Create or update a training/workshop event.
                 </DialogDescription>
               </DialogHeader>
               <div className="space-y-3">
@@ -270,15 +323,55 @@ export default function Trainings() {
                   value={form.title}
                   onChange={(event) => setForm((prev) => ({ ...prev, title: event.target.value }))}
                 />
-                <Input
-                  placeholder="Category"
+                <Select
                   value={form.category}
-                  onChange={(event) => setForm((prev) => ({ ...prev, category: event.target.value }))}
-                />
+                  onValueChange={(value) =>
+                    setForm((prev) => ({ ...prev, category: value, provider: "" }))
+                  }
+                >
+                  <SelectTrigger>
+                    <SelectValue placeholder="Category" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="internal">Internal</SelectItem>
+                    <SelectItem value="external">External</SelectItem>
+                  </SelectContent>
+                </Select>
+                {form.category === "external" ? (
+                  <Input
+                    placeholder="External Provider"
+                    value={form.provider}
+                    onChange={(event) =>
+                      setForm((prev) => ({ ...prev, provider: event.target.value }))
+                    }
+                  />
+                ) : (
+                  <Select
+                    value={form.provider}
+                    onValueChange={(value) => setForm((prev) => ({ ...prev, provider: value }))}
+                  >
+                    <SelectTrigger>
+                      <SelectValue placeholder="Provider (Department/College)" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {providerOptions.length > 0 ? (
+                        providerOptions.map((providerName) => (
+                          <SelectItem key={providerName} value={providerName}>
+                            {providerName}
+                          </SelectItem>
+                        ))
+                      ) : (
+                        <SelectItem value="__no_provider_options__" disabled>
+                          No department/college options available
+                        </SelectItem>
+                      )}
+                    </SelectContent>
+                  </Select>
+                )}
                 <Input
-                  placeholder="Provider"
-                  value={form.provider}
-                  onChange={(event) => setForm((prev) => ({ ...prev, provider: event.target.value }))}
+                  placeholder="Venue"
+                  value={form.venue}
+                  onChange={(event) => setForm((prev) => ({ ...prev, venue: event.target.value }))}
                 />
                 <div className="grid grid-cols-2 gap-2">
                   <Input
@@ -294,12 +387,14 @@ export default function Trainings() {
                     onChange={(event) => setForm((prev) => ({ ...prev, endDate: event.target.value }))}
                   />
                 </div>
-                <Input
-                  placeholder="Hours"
-                  type="number"
-                  value={form.hours}
-                  onChange={(event) => setForm((prev) => ({ ...prev, hours: event.target.value }))}
-                />
+                <div className="space-y-2">
+                  <label className="text-sm font-medium text-foreground">Hours Credit</label>
+                  <Input
+                    type="number"
+                    value={form.hours}
+                    onChange={(event) => setForm((prev) => ({ ...prev, hours: event.target.value }))}
+                  />
+                </div>
                 <Select
                   value={form.deliveryMode}
                   onValueChange={(value) => setForm((prev) => ({ ...prev, deliveryMode: value }))}
@@ -312,34 +407,6 @@ export default function Trainings() {
                     <SelectItem value="virtual">Virtual</SelectItem>
                     <SelectItem value="hybrid">Hybrid</SelectItem>
                     <SelectItem value="self_paced">Self Paced</SelectItem>
-                  </SelectContent>
-                </Select>
-                <Select
-                  value={form.ownerUnitId}
-                  onValueChange={(value) => setForm((prev) => ({ ...prev, ownerUnitId: value }))}
-                >
-                  <SelectTrigger>
-                    <SelectValue placeholder="Owner Unit" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {units.map((unit: any) => (
-                      <SelectItem key={unit.id} value={unit.id}>
-                        {unit.name}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-                <Select
-                  value={form.visibilityScope}
-                  onValueChange={(value) => setForm((prev) => ({ ...prev, visibilityScope: value }))}
-                >
-                  <SelectTrigger>
-                    <SelectValue placeholder="Visibility" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="unit">Unit</SelectItem>
-                    <SelectItem value="department">Department</SelectItem>
-                    <SelectItem value="org">Organization</SelectItem>
                   </SelectContent>
                 </Select>
                 <Select
@@ -357,7 +424,7 @@ export default function Trainings() {
                   </SelectContent>
                 </Select>
                 <Button onClick={handleCreateOrUpdate}>
-                  {editingEventId ? "Save Changes" : "Create Event"}
+                  {editingEventId ? "Save Changes" : "Create Training/Workshop"}
                 </Button>
               </div>
             </DialogContent>
@@ -387,7 +454,7 @@ export default function Trainings() {
               <CardHeader>
                 <div className="flex items-start justify-between">
                   <Badge variant="outline" className="mb-2 w-fit border-primary/20 bg-primary/5 text-primary">
-                    {event.category || event.deliveryMode}
+                    {formatCategoryLabel(event.category) || event.deliveryMode}
                   </Badge>
                   {canCreate ? (
                     <DropdownMenu>
@@ -438,7 +505,7 @@ export default function Trainings() {
                   </div>
                   <div className="flex items-center">
                     <Users className="mr-2 h-3.5 w-3.5" />
-                    {event.provider || "Internal"}
+                    {event.provider || (normalizeCategory(event.category) === "internal" ? "Internal" : "-")}
                   </div>
                 </div>
               </CardContent>
@@ -487,7 +554,12 @@ export default function Trainings() {
                   {detailsEvent.isMandatory ? "Yes" : "No"}
                 </div>
                 <div>
-                  <span className="font-medium">Provider:</span> {detailsEvent.provider || "Internal"}
+                  <span className="font-medium">Provider:</span>{" "}
+                  {detailsEvent.provider ||
+                    (normalizeCategory(detailsEvent.category) === "internal" ? "Internal" : "-")}
+                </div>
+                <div>
+                  <span className="font-medium">Venue:</span> {detailsEvent.venue || "-"}
                 </div>
                 <div>
                   <span className="font-medium">Hours:</span> {detailsEvent.hours}
@@ -501,17 +573,6 @@ export default function Trainings() {
                   <p className="mt-1">{detailsEvent.description}</p>
                 </div>
               ) : null}
-              <div className="space-y-2">
-                <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                  Evidence
-                </div>
-                <EvidenceManager
-                  entityType="training_event"
-                  entityId={detailsEvent.id}
-                  canUpload={canUploadEvidence}
-                  canDelete={canDeleteEvidence}
-                />
-              </div>
             </div>
           ) : null}
         </DialogContent>

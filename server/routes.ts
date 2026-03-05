@@ -106,6 +106,7 @@ const trainingEventInputSchema = z.object({
   category: z.string().optional().nullable(),
   deliveryMode: z.enum(["in_person", "virtual", "hybrid", "self_paced"]),
   provider: z.string().optional().nullable(),
+  venue: z.string().optional().nullable(),
   startDate: z.string().min(1, "Start date is required."),
   endDate: z.string().min(1, "End date is required."),
   hours: z.union([z.number(), z.string().min(1, "Hours is required.")]),
@@ -597,48 +598,22 @@ export async function registerRoutes(
 
   api.get(
     "/users",
-    requireRole([
-      "super_admin",
-      "hr_qa_approver",
-      "unit_head",
-      "encoder",
-      "viewer_auditor",
-    ]),
+    requireRole(["super_admin"]),
     async (req, res) => {
-    const rows = await db.select().from(users).orderBy(asc(users.fullName));
-    const userUnitRows = await db.select().from(userUnits);
-    const usersWithPassword = await getUserIdsWithPasswordCredentials(
-      rows.map((row) => row.id),
-    );
-    const unitMap = userUnitRows.reduce<Record<string, string[]>>((acc, row) => {
-      acc[row.userId] = acc[row.userId] || [];
-      acc[row.userId].push(row.unitId);
-      return acc;
-    }, {});
-      if (req.user!.role === "super_admin" || req.user!.role === "hr_qa_approver") {
-        return res.json({
-          users: rows.map((user) => ({
-            ...user,
-            unitIds: unitMap[user.id] || [],
-            hasPassword: usersWithPassword.has(user.id),
-          })),
-        });
-      }
-
-      const scopeUnitIds = await getScopedUnitIds(req.user!);
-      const scopedRows = rows.filter((user) => {
-        if (user.id === req.user!.id) return true;
-        const assignedUnits = unitMap[user.id] || [];
-        return assignedUnits.some((unitId) => scopeUnitIds.includes(unitId));
-      });
+      const rows = await db.select().from(users).orderBy(asc(users.fullName));
+      const userUnitRows = await db.select().from(userUnits);
+      const usersWithPassword = await getUserIdsWithPasswordCredentials(
+        rows.map((row) => row.id),
+      );
+      const unitMap = userUnitRows.reduce<Record<string, string[]>>((acc, row) => {
+        acc[row.userId] = acc[row.userId] || [];
+        acc[row.userId].push(row.unitId);
+        return acc;
+      }, {});
 
       res.json({
-        users: scopedRows.map((user) => ({
-          id: user.id,
-          email: user.email,
-          fullName: user.fullName,
-          role: user.role,
-          isActive: user.isActive,
+        users: rows.map((user) => ({
+          ...user,
           unitIds: unitMap[user.id] || [],
           hasPassword: usersWithPassword.has(user.id),
         })),
