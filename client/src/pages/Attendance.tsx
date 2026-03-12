@@ -73,18 +73,24 @@ export default function Attendance() {
   const [invalidResolveMap, setInvalidResolveMap] = useState<Record<string, boolean>>({});
   const [uploading, setUploading] = useState(false);
   const [submittingAll, setSubmittingAll] = useState(false);
+  const [submittingRowMap, setSubmittingRowMap] = useState<Record<string, boolean>>({});
+  const [committingImport, setCommittingImport] = useState(false);
   const csvFileInputRef = useRef<HTMLInputElement | null>(null);
   const [employeePickerOpen, setEmployeePickerOpen] = useState(false);
   const [manualOpen, setManualOpen] = useState(false);
   const [archiveDialogOpen, setArchiveDialogOpen] = useState(false);
   const [archiveRow, setArchiveRow] = useState<AttendanceRow | null>(null);
   const [archiveReason, setArchiveReason] = useState("");
+  const [highlightedAttendanceId, setHighlightedAttendanceId] = useState<string | null>(null);
   const [manualForm, setManualForm] = useState({
     employeeId: "",
     attendanceDate: "",
     hoursCredited: "0",
     attendanceStatus: "present",
   });
+  const searchParams = new URLSearchParams(window.location.search);
+  const focusAttendanceId = searchParams.get("focusAttendanceId");
+  const focusTrainingEventId = searchParams.get("trainingEventId");
 
   const { data: trainingData, isLoading: trainingsLoading } = useQuery({
     queryKey: ["/api/training-events"],
@@ -186,6 +192,22 @@ export default function Attendance() {
     }));
   }, [selectedEvent?.id, selectedEvent?.hours]);
 
+  useEffect(() => {
+    if (!focusTrainingEventId) return;
+    if (!events.some((event: any) => event.id === focusTrainingEventId)) return;
+    setSelectedEventId((current) => current || focusTrainingEventId);
+  }, [events, focusTrainingEventId]);
+
+  useEffect(() => {
+    if (!focusAttendanceId) return;
+    if (!filteredAttendance.some((row: AttendanceRow) => row.id === focusAttendanceId)) return;
+    setHighlightedAttendanceId(focusAttendanceId);
+    const timer = window.setTimeout(() => {
+      setHighlightedAttendanceId((current) => (current === focusAttendanceId ? null : current));
+    }, 5000);
+    return () => window.clearTimeout(timer);
+  }, [focusAttendanceId, filteredAttendance]);
+
   const handleCsvUpload = async (file: File) => {
     if (!canBulkImport) return;
     if (!selectedEventId) return;
@@ -200,7 +222,52 @@ export default function Attendance() {
         credentials: "include",
       });
       if (!res.ok) {
-        throw new Error(await getResponseMessage(res));
+        const rawText = await res.text();
+        let payload: any = null;
+        try {
+          payload = rawText ? JSON.parse(rawText) : null;
+        } catch {
+          payload = null;
+        }
+
+        if (res.status === 409 && payload?.batchId) {
+          const existingRes = await fetch(`/api/attendance/import/${payload.batchId}`, {
+            credentials: "include",
+          });
+          if (existingRes.ok) {
+            const existingData = await existingRes.json();
+            setImportBatch(existingData.batch);
+            setImportRows(existingData.rows ?? []);
+            setDecisionMap({});
+            setResolveMap({});
+            setInvalidResolveMap({});
+            toast({
+              title: "Existing CSV batch loaded",
+              description: "This file was already uploaded. Continue resolving and commit when ready.",
+            });
+            return;
+          }
+          toast({
+            title: "CSV already uploaded",
+            description:
+              "This file already exists for the selected event. Refresh the page to continue with the existing batch.",
+          });
+          return;
+        }
+
+        if (
+          res.status === 409 &&
+          typeof payload?.message === "string" &&
+          payload.message.toLowerCase().includes("already uploaded")
+        ) {
+          toast({
+            title: "CSV already uploaded",
+            description: payload.message,
+          });
+          return;
+        }
+
+        throw new Error(typeof payload?.message === "string" ? payload.message : rawText || "Request failed.");
       }
       const data = await res.json();
       setImportBatch(data.batch);
@@ -209,8 +276,10 @@ export default function Attendance() {
       setResolveMap({});
       setInvalidResolveMap({});
       toast({
-        title: "CSV uploaded",
-        description: "Review matched rows, resolve unmatched entries, then commit import.",
+        title: data.reusedExistingBatch ? "Existing CSV batch loaded" : "CSV uploaded",
+        description: data.reusedExistingBatch
+          ? "This file is already pending review. Continue resolving and commit when ready."
+          : "Review matched rows, resolve unmatched entries, then commit import.",
       });
     } catch (error) {
       toast({
@@ -248,19 +317,34 @@ export default function Attendance() {
   const handleCommit = async () => {
     if (!canManageAttendance) return;
     if (!importBatch) return;
+    if (committingImport) return;
     const decisions = Object.entries(decisionMap).map(([rowId, action]) => ({
       rowId,
       action,
     }));
-    await apiRequest("POST", `/api/attendance/import/${importBatch.id}/commit`, {
-      decisions,
-    });
-    setImportBatch(null);
-    setImportRows([]);
-    setDecisionMap({});
-    setResolveMap({});
-    setInvalidResolveMap({});
-    await refetchAttendance();
+    try {
+      setCommittingImport(true);
+      await apiRequest("POST", `/api/attendance/import/${importBatch.id}/commit`, {
+        decisions,
+      });
+      setImportBatch(null);
+      setImportRows([]);
+      setDecisionMap({});
+      setResolveMap({});
+      setInvalidResolveMap({});
+      await refetchAttendance();
+      toast({
+        title: "Import committed successfully.",
+      });
+    } catch (error) {
+      toast({
+        variant: "destructive",
+        title: "Failed to commit import",
+        description: error instanceof Error ? error.message : "Unable to commit import batch.",
+      });
+    } finally {
+      setCommittingImport(false);
+    }
   };
 
   const handleManualCreate = async () => {
@@ -306,9 +390,25 @@ export default function Attendance() {
   };
 
   const submitAttendance = async (attendanceId: string) => {
-    await apiRequest("POST", `/api/attendance/${attendanceId}/submit`);
-    await queryClient.invalidateQueries({ queryKey: ["/api/approvals"] });
-    await refetchAttendance();
+    if (submittingAll || submittingRowMap[attendanceId]) return;
+    try {
+      setSubmittingRowMap((prev) => ({ ...prev, [attendanceId]: true }));
+      await apiRequest("POST", `/api/attendance/${attendanceId}/submit`);
+      await queryClient.invalidateQueries({ queryKey: ["/api/approvals"] });
+      await refetchAttendance();
+    } catch (error) {
+      toast({
+        variant: "destructive",
+        title: "Failed to submit attendance",
+        description: error instanceof Error ? error.message : "Unable to submit attendance record.",
+      });
+    } finally {
+      setSubmittingRowMap((prev) => {
+        const next = { ...prev };
+        delete next[attendanceId];
+        return next;
+      });
+    }
   };
 
   const archiveAttendance = async () => {
@@ -323,9 +423,15 @@ export default function Attendance() {
   };
 
   const submitAllAttendance = async () => {
-    if (submittableRows.length === 0) return;
+    if (submittableRows.length === 0 || submittingAll) return;
     try {
       setSubmittingAll(true);
+      setSubmittingRowMap(
+        submittableRows.reduce<Record<string, boolean>>((acc, row) => {
+          acc[row.id] = true;
+          return acc;
+        }, {}),
+      );
       const results = await Promise.allSettled(
         submittableRows.map((row) => apiRequest("POST", `/api/attendance/${row.id}/submit`)),
       );
@@ -346,6 +452,7 @@ export default function Attendance() {
       }
     } finally {
       setSubmittingAll(false);
+      setSubmittingRowMap({});
     }
   };
 
@@ -602,9 +709,18 @@ export default function Attendance() {
                   </>
                 ) : null}
                 {canManageAttendance && importBatch && (
-                  <Button size="sm" onClick={handleCommit}>
-                    <Save className="mr-2 h-4 w-4" />
-                    Commit Import
+                  <Button size="sm" onClick={handleCommit} disabled={committingImport}>
+                    {committingImport ? (
+                      <>
+                        <Spinner className="mr-2 h-4 w-4" />
+                        Committing...
+                      </>
+                    ) : (
+                      <>
+                        <Save className="mr-2 h-4 w-4" />
+                        Commit Import
+                      </>
+                    )}
                   </Button>
                 )}
               </div>
@@ -626,6 +742,9 @@ export default function Attendance() {
                     <span className="font-medium">
                       Email, Participants, Date, Title (must match selected event)
                     </span>
+                    . Date supports single date, comma-separated dates, or ranges using{" "}
+                    <span className="font-medium">to</span> (e.g.,{" "}
+                    <span className="font-medium">10/29/25 to 12/17/25</span>).
                   </p>
                 ) : null}
 
@@ -653,7 +772,12 @@ export default function Attendance() {
                       {filteredAttendance.map((row: AttendanceRow) => {
                         const emp = employeeMap.get(row.employeeId);
                         return (
-                          <TableRow key={row.id}>
+                          <TableRow
+                            key={row.id}
+                            className={
+                              highlightedAttendanceId === row.id ? "bg-primary/5 ring-1 ring-primary/40" : ""
+                            }
+                          >
                             <TableCell>
                               <div className="font-medium">{emp?.fullName ?? "Unknown"}</div>
                               <div className="text-xs text-muted-foreground">{emp?.employeeNo ?? "—"}</div>
@@ -668,10 +792,17 @@ export default function Attendance() {
                                   <Button
                                     variant="outline"
                                     size="sm"
-                                    disabled={submittingAll}
+                                    disabled={submittingAll || submittingRowMap[row.id]}
                                     onClick={() => submitAttendance(row.id)}
                                   >
-                                    Submit
+                                    {submittingRowMap[row.id] ? (
+                                      <>
+                                        <Spinner className="mr-2 h-4 w-4" />
+                                        Submitting...
+                                      </>
+                                    ) : (
+                                      "Submit"
+                                    )}
                                   </Button>
                                 ) : null}
                                 {canManageAttendance ? (
@@ -714,6 +845,7 @@ export default function Attendance() {
                             <TableHead>Participants</TableHead>
                             <TableHead>Date</TableHead>
                             <TableHead>Status</TableHead>
+                            <TableHead>Reason</TableHead>
                             <TableHead>Resolution</TableHead>
                             <TableHead>Duplicate</TableHead>
                           </TableRow>
@@ -741,6 +873,9 @@ export default function Attendance() {
                                 <TableCell>{attendanceDate || "-"}</TableCell>
                                 <TableCell>
                                   <Badge variant="outline">{row.matchStatus}</Badge>
+                                </TableCell>
+                                <TableCell className="max-w-[260px] text-xs text-muted-foreground">
+                                  {row.errorMessage || "-"}
                                 </TableCell>
                                 <TableCell>
                                   {row.matchStatus === "unmatched" ? (
@@ -809,8 +944,15 @@ export default function Attendance() {
 
                     {canManageAttendance ? (
                       <div className="flex justify-end">
-                        <Button variant="outline" onClick={handleResolve}>
-                          Resolve Unmatched
+                        <Button variant="outline" onClick={handleResolve} disabled={committingImport}>
+                          {committingImport ? (
+                            <>
+                              <Spinner className="mr-2 h-4 w-4" />
+                              Committing...
+                            </>
+                          ) : (
+                            "Resolve Unmatched"
+                          )}
                         </Button>
                       </div>
                     ) : null}

@@ -46,7 +46,8 @@ export default function Login() {
   }, [oauthError]);
 
   if (user) {
-    window.location.href = "/dashboard";
+    window.location.replace("/dashboard");
+    return null;
   }
 
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
@@ -62,7 +63,7 @@ export default function Login() {
         password: normalizedPassword,
       });
       await queryClient.invalidateQueries({ queryKey: ["/api/auth/me"] });
-      window.location.href = "/dashboard";
+      window.location.replace("/dashboard");
     } catch (error) {
       setErrorMessage(parseErrorMessage(error));
     } finally {

@@ -41,6 +41,53 @@ type AuditRow = {
   ip: string | null;
 };
 
+const entityLabelByType: Record<string, string> = {
+  auth_session: "Authentication Session",
+  user: "User Account",
+  employee: "Employee Record",
+  training_event: "Training Event",
+  attendance_record: "Attendance Record",
+  attachment: "File Attachment",
+  unit: "Department/Unit",
+};
+
+function formatEntityLabel(entityType: string) {
+  return entityLabelByType[entityType] || entityType.replace(/_/g, " ");
+}
+
+function formatActionLabel(action: string) {
+  const knownActions: Record<string, string> = {
+    "auth.login.success": "User signed in successfully",
+    "auth.login.failed": "Sign-in attempt failed",
+    "auth.logout": "User signed out",
+    "auth.password.change": "User changed own password",
+    "user.create": "User account created",
+    "user.update": "User account updated",
+    "user.password.set": "User password set by admin",
+    "employee.create": "Employee profile created",
+    "employee.update": "Employee profile updated",
+    "employee.delete": "Employee profile archived",
+    "training_event.create": "Training event created",
+    "training_event.update": "Training event updated",
+    "training_event.submit": "Training event submitted for approval",
+    "training_event.return": "Training event returned for revision",
+    "training_event.approve": "Training event approved",
+    "training_event.lock": "Training event locked",
+    "training_event.reopen": "Training event reopened",
+    "attendance_record.create": "Attendance record created",
+    "attendance_record.update": "Attendance record updated",
+    "attendance_record.submit": "Attendance record submitted for approval",
+    "attendance_record.return": "Attendance record returned for revision",
+    "attendance_record.approve": "Attendance record approved",
+    "attendance_record.lock": "Attendance record locked",
+    "attendance_record.reopen": "Attendance record reopened",
+  };
+  if (knownActions[action]) return knownActions[action];
+
+  const normalized = action.replace(/[._]/g, " ");
+  return normalized.charAt(0).toUpperCase() + normalized.slice(1);
+}
+
 function toCsv(rows: AuditRow[]) {
   const headers = ["createdAt", "action", "entityType", "entityId", "actorUserId", "ip"];
   const escapeCell = (value: unknown) => {
@@ -79,9 +126,11 @@ export default function Audit() {
   const filteredLogs = useMemo(() => {
     return logs.filter((row) => {
       const matchesEntityType = entityTypeFilter
-        ? row.entityType.toLowerCase().includes(entityTypeFilter.toLowerCase())
+        ? `${row.entityType} ${formatEntityLabel(row.entityType)}`
+            .toLowerCase()
+            .includes(entityTypeFilter.toLowerCase())
         : true;
-      const haystack = `${row.action} ${row.entityType} ${row.entityId || ""} ${row.actorUserId || ""}`
+      const haystack = `${row.action} ${formatActionLabel(row.action)} ${row.entityType} ${formatEntityLabel(row.entityType)} ${row.entityId || ""} ${row.actorUserId || ""}`
         .toLowerCase();
       const matchesSearch = searchFilter ? haystack.includes(searchFilter.toLowerCase()) : true;
       return matchesEntityType && matchesSearch;
@@ -109,7 +158,7 @@ export default function Audit() {
         <div>
           <h1 className="text-2xl font-display font-bold">Audit Log</h1>
           <p className="text-muted-foreground">
-            Review system events and export filtered audit entries.
+            Review activity history and export filtered records.
           </p>
         </div>
         <Button variant="outline" onClick={exportCsv} disabled={filteredLogs.length === 0}>
@@ -121,18 +170,18 @@ export default function Audit() {
       <Card className="border-border/60">
         <CardHeader>
           <CardTitle>Filters</CardTitle>
-          <CardDescription>Narrow logs by entity type and keyword search.</CardDescription>
+          <CardDescription>Use plain-language filters to find specific activities.</CardDescription>
         </CardHeader>
         <CardContent className="grid gap-3 md:grid-cols-2">
           <Input
             value={entityTypeFilter}
             onChange={(event) => setEntityTypeFilter(event.target.value)}
-            placeholder="Filter entity type (e.g. training_event)"
+            placeholder="Filter record type (e.g. training event)"
           />
           <Input
             value={searchFilter}
             onChange={(event) => setSearchFilter(event.target.value)}
-            placeholder="Search action, entity id, actor id"
+            placeholder="Search activity, record id, or actor id"
           />
         </CardContent>
       </Card>
@@ -147,8 +196,8 @@ export default function Audit() {
             <TableHeader>
               <TableRow>
                 <TableHead>Time</TableHead>
-                <TableHead>Action</TableHead>
-                <TableHead>Entity</TableHead>
+                <TableHead>What Happened</TableHead>
+                <TableHead>Record</TableHead>
                 <TableHead>Actor</TableHead>
                 <TableHead>IP</TableHead>
                 <TableHead className="text-right">Details</TableHead>
@@ -166,10 +215,12 @@ export default function Audit() {
                       minute: "2-digit",
                     })}
                   </TableCell>
-                  <TableCell className="font-medium">{row.action}</TableCell>
+                  <TableCell className="font-medium">{formatActionLabel(row.action)}</TableCell>
                   <TableCell>
                     <div className="flex items-center gap-2">
-                      <Badge variant="outline">{row.entityType}</Badge>
+                      <Badge variant="outline" className="capitalize">
+                        {formatEntityLabel(row.entityType)}
+                      </Badge>
                       <span className="max-w-[200px] truncate text-xs text-muted-foreground">
                         {row.entityId || "-"}
                       </span>
@@ -198,6 +249,22 @@ export default function Audit() {
               Detailed payload for selected audit row.
             </DialogDescription>
           </DialogHeader>
+          <div className="rounded-md border bg-muted/20 p-3 text-sm">
+            <div>
+              <span className="font-medium">Activity:</span>{" "}
+              {selectedRow ? formatActionLabel(selectedRow.action) : "-"}
+            </div>
+            <div>
+              <span className="font-medium">Record Type:</span>{" "}
+              {selectedRow ? formatEntityLabel(selectedRow.entityType) : "-"}
+            </div>
+            <div>
+              <span className="font-medium">Record ID:</span> {selectedRow?.entityId || "-"}
+            </div>
+            <div>
+              <span className="font-medium">Actor ID:</span> {selectedRow?.actorUserId || "-"}
+            </div>
+          </div>
           <div className="grid gap-4 md:grid-cols-2">
             <div className="space-y-2">
               <h3 className="text-sm font-semibold">Before</h3>

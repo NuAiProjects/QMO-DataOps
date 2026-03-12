@@ -3,6 +3,7 @@ import express from "express";
 import { type Server } from "http";
 import path from "path";
 import fs from "fs/promises";
+import { createHash } from "crypto";
 import { createReadStream } from "fs";
 import multer from "multer";
 import { parse } from "csv-parse/sync";
@@ -197,6 +198,11 @@ function normalizeLooseCsvText(value: string | null | undefined) {
   return normalizeCsvText(value).replace(/[^a-z0-9]/g, "");
 }
 
+function normalizeAttendanceTitleKey(value: string | null | undefined) {
+  const normalized = normalizeCsvText(value).replace(/^(the|a|an)\s+/, "");
+  return normalized.replace(/[^a-z0-9]/g, "");
+}
+
 function getCsvRowValue(row: Record<string, string>, keys: string[]) {
   for (const key of keys) {
     const value = row[key];
@@ -235,6 +241,22 @@ function toIsoDate(year: number, month: number, day: number) {
   return iso;
 }
 
+function isIsoDateString(value: string) {
+  return /^\d{4}-\d{2}-\d{2}$/.test(value);
+}
+
+function isStartDateAfterEndDate(startDate: string, endDate: string) {
+  if (!isIsoDateString(startDate) || !isIsoDateString(endDate)) {
+    return false;
+  }
+  const start = new Date(`${startDate}T00:00:00.000Z`).getTime();
+  const end = new Date(`${endDate}T00:00:00.000Z`).getTime();
+  if (Number.isNaN(start) || Number.isNaN(end)) {
+    return false;
+  }
+  return start > end;
+}
+
 function isImportableTrainingEventStatus(status: string) {
   return status === "draft" || status === "returned" || status === "approved";
 }
@@ -248,14 +270,18 @@ function normalizeAttendanceCsvDate(input: string | null | undefined) {
     return toIsoDate(Number(isoMatch[1]), Number(isoMatch[2]), Number(isoMatch[3]));
   }
 
-  const slashMatch = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(value);
+  const slashMatch = /^(\d{1,2})\/(\d{1,2})\/(\d{2}|\d{4})$/.exec(value);
   if (slashMatch) {
-    return toIsoDate(Number(slashMatch[3]), Number(slashMatch[1]), Number(slashMatch[2]));
+    const rawYear = Number(slashMatch[3]);
+    const year = slashMatch[3].length === 2 ? 2000 + rawYear : rawYear;
+    return toIsoDate(year, Number(slashMatch[1]), Number(slashMatch[2]));
   }
 
-  const dashMatch = /^(\d{1,2})-(\d{1,2})-(\d{4})$/.exec(value);
+  const dashMatch = /^(\d{1,2})-(\d{1,2})-(\d{2}|\d{4})$/.exec(value);
   if (dashMatch) {
-    return toIsoDate(Number(dashMatch[3]), Number(dashMatch[1]), Number(dashMatch[2]));
+    const rawYear = Number(dashMatch[3]);
+    const year = dashMatch[3].length === 2 ? 2000 + rawYear : rawYear;
+    return toIsoDate(year, Number(dashMatch[1]), Number(dashMatch[2]));
   }
 
   const textMonthMatch = /^(\d{1,2})-([a-zA-Z]{3,9})-(\d{2}|\d{4})$/.exec(value);
@@ -283,6 +309,73 @@ function normalizeAttendanceCsvDate(input: string | null | undefined) {
   }
 
   return null;
+}
+
+function parseAttendanceCsvDates(input: string | null | undefined) {
+  const value = (input ?? "").trim();
+  if (!value) {
+    return {
+      dates: [] as string[],
+      error: "Date is required.",
+    };
+  }
+
+  const collapsedValue = value.replace(/\s+/g, " ").trim();
+  const rangeMatch =
+    /^(.+?)\s+(?:to)\s+(.+)$/i.exec(collapsedValue) ||
+    /^(.+?)\s*(?:-|–|—)\s*(.+)$/.exec(collapsedValue);
+  if (rangeMatch) {
+    const startIso = normalizeAttendanceCsvDate(rangeMatch[1]);
+    const endIso = normalizeAttendanceCsvDate(rangeMatch[2]);
+    if (!startIso || !endIso) {
+      return {
+        dates: [] as string[],
+        error:
+          "Date range must use valid start and end dates (e.g., 2025-10-29 to 2025-12-17).",
+      };
+    }
+    const start = new Date(`${startIso}T00:00:00.000Z`);
+    const end = new Date(`${endIso}T00:00:00.000Z`);
+    if (start.getTime() > end.getTime()) {
+      return {
+        dates: [] as string[],
+        error: "Date range start must be on or before the end date.",
+      };
+    }
+
+    const diffDays = Math.floor((end.getTime() - start.getTime()) / (24 * 60 * 60 * 1000));
+    const useWeeklyStep = diffDays >= 7 && start.getUTCDay() === end.getUTCDay();
+    const stepDays = useWeeklyStep ? 7 : 1;
+    const dates: string[] = [];
+    const cursor = new Date(start);
+    while (cursor.getTime() <= end.getTime()) {
+      dates.push(cursor.toISOString().slice(0, 10));
+      cursor.setUTCDate(cursor.getUTCDate() + stepDays);
+    }
+    return { dates };
+  }
+
+  const splitValues = value
+    .split(/[;,]/)
+    .map((segment) => segment.trim())
+    .filter(Boolean);
+  const sourceValues = splitValues.length > 0 ? splitValues : [value];
+  const parsedDates: string[] = [];
+  for (const candidate of sourceValues) {
+    const parsed = normalizeAttendanceCsvDate(candidate);
+    if (!parsed) {
+      return {
+        dates: [] as string[],
+        error:
+          "Date must be in YYYY-MM-DD, MM/DD/YYYY, MM/DD/YY, or DD-MMM-YY format. Ranges may use 'to'.",
+      };
+    }
+    parsedDates.push(parsed);
+  }
+
+  return {
+    dates: Array.from(new Set(parsedDates)).sort(),
+  };
 }
 
 function isEditableStatus(status: string) {
@@ -485,6 +578,20 @@ function toIsoTimestamp(value: Date | string | null | undefined) {
   const date = value instanceof Date ? value : new Date(value);
   if (Number.isNaN(date.getTime())) return new Date(0).toISOString();
   return date.toISOString();
+}
+
+function buildPathWithQuery(
+  pathname: string,
+  params: Record<string, string | null | undefined>,
+) {
+  const search = new URLSearchParams();
+  for (const [key, value] of Object.entries(params)) {
+    if (typeof value === "string" && value.trim().length > 0) {
+      search.set(key, value);
+    }
+  }
+  const query = search.toString();
+  return query ? `${pathname}?${query}` : pathname;
 }
 
 function isRecentlyCreated(
@@ -1419,6 +1526,11 @@ export async function registerRoutes(
       if (!scopeUnitIds.includes(parsed.data.ownerUnitId)) {
         return res.status(403).json({ message: "Unit out of scope." });
       }
+      if (isStartDateAfterEndDate(parsed.data.startDate, parsed.data.endDate)) {
+        return res.status(400).json({
+          message: "Start date must be on or before end date.",
+        });
+      }
       const [created] = await db
         .insert(trainingEvents)
         .values({
@@ -1466,8 +1578,16 @@ export async function registerRoutes(
       if (parsed.data.ownerUnitId && !scopeUnitIds.includes(parsed.data.ownerUnitId)) {
         return res.status(403).json({ message: "Target unit out of scope." });
       }
-      if (!isEditableStatus(existing.workflowStatus)) {
+      const isSuperAdmin = req.user?.role === "super_admin";
+      if (!isEditableStatus(existing.workflowStatus) && !isSuperAdmin) {
         return res.status(400).json({ message: "Training event is not editable." });
+      }
+      const nextStartDate = parsed.data.startDate ?? existing.startDate;
+      const nextEndDate = parsed.data.endDate ?? existing.endDate;
+      if (isStartDateAfterEndDate(nextStartDate, nextEndDate)) {
+        return res.status(400).json({
+          message: "Start date must be on or before end date.",
+        });
       }
       const [updated] = await db
         .update(trainingEvents)
@@ -2303,6 +2423,33 @@ export async function registerRoutes(
         return res.status(403).json({ message: "Unit out of scope." });
       }
       const selectedEventTitleKey = normalizeCsvText(trainingEvent.title);
+      const selectedEventTitleLooseKey = normalizeAttendanceTitleKey(trainingEvent.title);
+      const fileHash = createHash("sha256").update(req.file.buffer).digest("hex");
+      const [existingBatch] = await db
+        .select()
+        .from(attendanceImportBatches)
+        .where(
+          and(
+            eq(attendanceImportBatches.trainingEventId, trainingEventId),
+            sql`${attendanceImportBatches.summaryJson} ->> 'fileHash' = ${fileHash}`,
+            inArray(attendanceImportBatches.status, ["parsed", "needs_review", "committed"]),
+          ),
+        )
+        .orderBy(desc(attendanceImportBatches.createdAt))
+        .limit(1);
+      if (existingBatch) {
+        if (existingBatch.status !== "committed") {
+          const existingRows = await db
+            .select()
+            .from(attendanceImportRows)
+            .where(eq(attendanceImportRows.batchId, existingBatch.id));
+          return res.status(200).json({
+            batch: existingBatch,
+            rows: existingRows,
+            reusedExistingBatch: true,
+          });
+        }
+      }
       const rawCsv = req.file.buffer.toString("utf-8");
       let parsedHeaders: string[] = [];
       let records: Record<string, string>[] = [];
@@ -2384,7 +2531,11 @@ export async function registerRoutes(
           continue;
         }
         const csvTitleKey = normalizeCsvText(titleValue);
-        if (csvTitleKey !== selectedEventTitleKey) {
+        const csvTitleLooseKey = normalizeAttendanceTitleKey(titleValue);
+        const isTitleMatch =
+          csvTitleKey === selectedEventTitleKey ||
+          csvTitleLooseKey === selectedEventTitleLooseKey;
+        if (!isTitleMatch) {
           rowsToInsert.push({
             rawRowJson: row,
             employeeNo: emailValue || participantsValue || "unknown",
@@ -2395,14 +2546,13 @@ export async function registerRoutes(
           continue;
         }
 
-        const normalizedDate = normalizeAttendanceCsvDate(dateValue);
-        if (!normalizedDate) {
+        const parsedDates = parseAttendanceCsvDates(dateValue);
+        if (parsedDates.error || parsedDates.dates.length === 0) {
           rowsToInsert.push({
             rawRowJson: row,
             employeeNo: emailValue || participantsValue,
             matchStatus: "invalid",
-            errorMessage:
-              "Date must be in YYYY-MM-DD, MM/DD/YYYY, or DD-MMM-YY format.",
+            errorMessage: parsedDates.error ?? "Invalid date format.",
           });
           invalid += 1;
           continue;
@@ -2410,7 +2560,7 @@ export async function registerRoutes(
         const normalizedEmail = normalizeCsvText(emailValue);
         if (!normalizedEmail) {
           rowsToInsert.push({
-            rawRowJson: { ...row, Date: normalizedDate },
+            rawRowJson: row,
             employeeNo: participantsValue || "unknown",
             matchStatus: "invalid",
             errorMessage: "Email is required and is used as the unique employee key.",
@@ -2421,7 +2571,7 @@ export async function registerRoutes(
         const isEmailValid = z.string().email().safeParse(normalizedEmail).success;
         if (!isEmailValid) {
           rowsToInsert.push({
-            rawRowJson: { ...row, Date: normalizedDate },
+            rawRowJson: row,
             employeeNo: emailValue,
             matchStatus: "invalid",
             errorMessage: "Invalid email format in Email column.",
@@ -2433,7 +2583,7 @@ export async function registerRoutes(
         const employeeMatches = employeeEmailMap.get(normalizedEmail) ?? [];
         if (employeeMatches.length > 1) {
           rowsToInsert.push({
-            rawRowJson: { ...row, Date: normalizedDate },
+            rawRowJson: row,
             employeeNo: emailValue,
             matchStatus: "unmatched",
             errorMessage:
@@ -2445,7 +2595,7 @@ export async function registerRoutes(
         const matchedEmployee = employeeMatches[0];
         if (!matchedEmployee) {
           rowsToInsert.push({
-            rawRowJson: { ...row, Date: normalizedDate },
+            rawRowJson: row,
             employeeNo: emailValue,
             matchStatus: "unmatched",
             errorMessage: "Employee not found by Email.",
@@ -2455,7 +2605,7 @@ export async function registerRoutes(
         }
 
         rowsToInsert.push({
-          rawRowJson: { ...row, Date: normalizedDate },
+          rawRowJson: row,
           employeeNo: matchedEmployee.email || matchedEmployee.employeeNo,
           resolvedEmployeeId: matchedEmployee.id,
           matchStatus: "matched",
@@ -2476,6 +2626,7 @@ export async function registerRoutes(
             matched,
             unmatched,
             invalid,
+            fileHash,
           },
         })
         .returning();
@@ -2507,6 +2658,41 @@ export async function registerRoutes(
       });
 
       res.status(201).json({ batch, rows: insertedRows });
+    },
+  );
+
+  api.get(
+    "/attendance/import/:batchId",
+    requireAnyRoleOrSuperAdmin(["encoder", "unit_head", "hr_qa_approver"]),
+    async (req, res) => {
+      const batchId = getRouteParam(req.params.batchId);
+      const [batch] = await db
+        .select()
+        .from(attendanceImportBatches)
+        .where(eq(attendanceImportBatches.id, batchId))
+        .limit(1);
+      if (!batch) {
+        return res.status(404).json({ message: "Batch not found." });
+      }
+
+      const [trainingEvent] = await db
+        .select({ ownerUnitId: trainingEvents.ownerUnitId })
+        .from(trainingEvents)
+        .where(and(eq(trainingEvents.id, batch.trainingEventId), trainingEventNotDeletedCondition()))
+        .limit(1);
+      if (!trainingEvent) {
+        return res.status(404).json({ message: "Training event not found." });
+      }
+      const scopeUnitIds = await getScopedUnitIds(req.user!);
+      if (!scopeUnitIds.includes(trainingEvent.ownerUnitId)) {
+        return res.status(403).json({ message: "Unit out of scope." });
+      }
+
+      const rows = await db
+        .select()
+        .from(attendanceImportRows)
+        .where(eq(attendanceImportRows.batchId, batchId));
+      res.json({ batch, rows });
     },
   );
 
@@ -2584,6 +2770,9 @@ export async function registerRoutes(
       if (!batch) {
         return res.status(404).json({ message: "Batch not found." });
       }
+      if (batch.status === "committed") {
+        return res.status(409).json({ message: "This import batch was already committed." });
+      }
       const [trainingEvent] = await db
         .select({
           ownerUnitId: trainingEvents.ownerUnitId,
@@ -2606,19 +2795,21 @@ export async function registerRoutes(
 
       const decisions = new Map(parsed.data.decisions?.map((d) => [d.rowId, d.action]));
       const results = { created: 0, updated: 0, skipped: 0 };
+      const processedAttendanceKeys = new Set<string>();
 
       for (const row of rows) {
         if (row.matchStatus !== "matched" || !row.resolvedEmployeeId) {
           continue;
         }
         const raw = row.rawRowJson as Record<string, string>;
-        const attendanceDate =
-          normalizeAttendanceCsvDate(raw.Date) ||
+        const rawDateValue =
+          raw.Date ||
           raw.attendance_date ||
           raw.attendanceDate ||
           raw["Attendance Date"] ||
           raw["attendance date"];
-        if (!attendanceDate) {
+        const parsedDates = parseAttendanceCsvDates(rawDateValue);
+        if (parsedDates.error || parsedDates.dates.length === 0) {
           continue;
         }
         const hoursCredited =
@@ -2636,52 +2827,73 @@ export async function registerRoutes(
           ? (attendanceStatus.toLowerCase() as "present" | "absent" | "partial")
           : "present";
 
-        const [existing] = await db
-          .select()
-          .from(attendanceRecords)
-          .where(
-            and(
-              eq(attendanceRecords.trainingEventId, batch.trainingEventId),
-              eq(attendanceRecords.employeeId, row.resolvedEmployeeId),
-              eq(attendanceRecords.attendanceDate, attendanceDate),
-              attendanceNotDeletedCondition(),
-            ),
-          )
-          .limit(1);
-
-        if (existing) {
-          const decision = decisions.get(row.id);
-          if (!decision) {
-            return res.status(400).json({
-              message: "Duplicate attendance found. Provide decisions for duplicates.",
-            });
-          }
-          if (decision === "skip") {
+        for (const attendanceDate of parsedDates.dates) {
+          const importAttendanceKey = `${row.resolvedEmployeeId}::${attendanceDate}`;
+          if (processedAttendanceKeys.has(importAttendanceKey)) {
             results.skipped += 1;
             continue;
           }
-          await db
-            .update(attendanceRecords)
-            .set({
+          processedAttendanceKeys.add(importAttendanceKey);
+
+          const [existing] = await db
+            .select()
+            .from(attendanceRecords)
+            .where(
+              and(
+                eq(attendanceRecords.trainingEventId, batch.trainingEventId),
+                eq(attendanceRecords.employeeId, row.resolvedEmployeeId),
+                eq(attendanceRecords.attendanceDate, attendanceDate),
+              ),
+            )
+            .limit(1);
+
+          if (existing) {
+            if (existing.deletedAt) {
+              await db
+                .update(attendanceRecords)
+                .set({
+                  deletedAt: null,
+                  deletedBy: null,
+                  deleteReason: null,
+                  returnNotes: null,
+                  hoursCredited: hoursCredited.toString(),
+                  attendanceStatus: normalizedStatus,
+                  workflowStatus: "draft",
+                  updatedBy: req.user!.id,
+                  updatedAt: new Date(),
+                })
+                .where(eq(attendanceRecords.id, existing.id));
+              results.updated += 1;
+              continue;
+            }
+            const decision = decisions.get(row.id) ?? "skip";
+            if (decision === "skip") {
+              results.skipped += 1;
+              continue;
+            }
+            await db
+              .update(attendanceRecords)
+              .set({
+                hoursCredited: hoursCredited.toString(),
+                attendanceStatus: normalizedStatus,
+                updatedBy: req.user!.id,
+                updatedAt: new Date(),
+              })
+              .where(and(eq(attendanceRecords.id, existing.id), attendanceNotDeletedCondition()));
+            results.updated += 1;
+          } else {
+            await db.insert(attendanceRecords).values({
+              trainingEventId: batch.trainingEventId,
+              employeeId: row.resolvedEmployeeId,
+              attendanceDate,
               hoursCredited: hoursCredited.toString(),
               attendanceStatus: normalizedStatus,
+              workflowStatus: "draft",
+              createdBy: req.user!.id,
               updatedBy: req.user!.id,
-              updatedAt: new Date(),
-            })
-            .where(and(eq(attendanceRecords.id, existing.id), attendanceNotDeletedCondition()));
-          results.updated += 1;
-        } else {
-          await db.insert(attendanceRecords).values({
-            trainingEventId: batch.trainingEventId,
-            employeeId: row.resolvedEmployeeId,
-            attendanceDate,
-            hoursCredited: hoursCredited.toString(),
-            attendanceStatus: normalizedStatus,
-            workflowStatus: "draft",
-            createdBy: req.user!.id,
-            updatedBy: req.user!.id,
-          });
-          results.created += 1;
+            });
+            results.created += 1;
+          }
         }
       }
 
@@ -2896,6 +3108,7 @@ export async function registerRoutes(
     const attendanceRows = await db
       .select({
         id: attendanceRecords.id,
+        trainingEventId: attendanceRecords.trainingEventId,
         workflowStatus: attendanceRecords.workflowStatus,
         attendanceDate: attendanceRecords.attendanceDate,
         createdAt: attendanceRecords.createdAt,
@@ -2936,7 +3149,9 @@ export async function registerRoutes(
           ? `New employee profile added: ${row.fullName}`
           : `Employee profile updated: ${row.fullName}`,
         subtitle: row.employeeNo,
-        href: "/employees",
+        href: buildPathWithQuery("/employees", {
+          focusEmployeeId: row.id,
+        }),
         createdAt: toIsoTimestamp(row.updatedAt ?? row.createdAt),
       });
     }
@@ -2958,7 +3173,9 @@ export async function registerRoutes(
         kind: "training",
         title,
         subtitle: `Start date: ${row.startDate}`,
-        href: "/trainings",
+        href: buildPathWithQuery("/trainings", {
+          focusTrainingId: row.id,
+        }),
         createdAt: toIsoTimestamp(row.updatedAt ?? row.createdAt),
       });
     }
@@ -2980,7 +3197,10 @@ export async function registerRoutes(
         kind: "attendance",
         title,
         subtitle: `${row.employeeName} (${row.employeeNo}) - ${row.trainingTitle}`,
-        href: "/attendance",
+        href: buildPathWithQuery("/attendance", {
+          trainingEventId: row.trainingEventId,
+          focusAttendanceId: row.id,
+        }),
         createdAt: toIsoTimestamp(row.updatedAt ?? row.createdAt),
       });
     }
@@ -3076,20 +3296,48 @@ export async function registerRoutes(
       .map((item) => item.row)
       .slice(0, 6);
 
+    const attendanceAttachmentIds = scopedAttachments
+      .filter((row) => row.entityType === "attendance_record")
+      .map((row) => row.entityId);
+
+    const attendanceAttachmentRows =
+      attendanceAttachmentIds.length === 0
+        ? []
+        : await db
+            .select({
+              id: attendanceRecords.id,
+              trainingEventId: attendanceRecords.trainingEventId,
+            })
+            .from(attendanceRecords)
+            .where(
+              and(
+                inArray(attendanceRecords.id, attendanceAttachmentIds),
+                attendanceNotDeletedCondition(),
+              ),
+            );
+
+    const attendanceTrainingEventById = new Map(
+      attendanceAttachmentRows.map((row) => [row.id, row.trainingEventId]),
+    );
+
     const results = [
       ...employeeRows.map((row) => ({
         id: `employee-${row.id}`,
         type: "employee",
         title: row.fullName,
         subtitle: row.employeeNo,
-        href: "/employees",
+        href: buildPathWithQuery("/employees", {
+          focusEmployeeId: row.id,
+        }),
       })),
       ...trainingRows.map((row) => ({
         id: `training-${row.id}`,
         type: "training",
         title: row.title,
         subtitle: row.category || row.provider || "Training event",
-        href: "/trainings",
+        href: buildPathWithQuery("/trainings", {
+          focusTrainingId: row.id,
+        }),
       })),
       ...scopedAttachments.map((row) => ({
         id: `document-${row.id}`,
@@ -3098,10 +3346,17 @@ export async function registerRoutes(
         subtitle: "Attachment",
         href:
           row.entityType === "attendance_record"
-            ? "/attendance"
+            ? buildPathWithQuery("/attendance", {
+                trainingEventId: attendanceTrainingEventById.get(row.entityId),
+                focusAttendanceId: row.entityId,
+              })
             : row.entityType === "training_event"
-              ? "/trainings"
-              : "/employees",
+              ? buildPathWithQuery("/trainings", {
+                  focusTrainingId: row.entityId,
+                })
+              : buildPathWithQuery("/employees", {
+                  focusEmployeeId: row.entityId,
+                }),
       })),
     ];
 
@@ -3392,6 +3647,80 @@ export async function registerRoutes(
     res.json(paginateReportRows(rows, requestedPage));
   });
 
+  api.delete(
+    "/approvals/pending",
+    requireRole(["super_admin"]),
+    async (req, res) => {
+      const scopeUnitIds = await getScopedUnitIds(req.user!);
+      if (scopeUnitIds.length === 0) {
+        return res.json({ trainingDeleted: 0, attendanceDeleted: 0 });
+      }
+
+      const deletedAt = new Date();
+      const deleteReason = "Temporary bulk delete from Approvals Pending Review.";
+      const trainingDeleted = await db
+        .update(trainingEvents)
+        .set({
+          deletedAt,
+          deletedBy: req.user!.id,
+          deleteReason,
+          updatedAt: deletedAt,
+          updatedBy: req.user!.id,
+        })
+        .where(
+          and(
+            inArray(trainingEvents.ownerUnitId, scopeUnitIds),
+            eq(trainingEvents.workflowStatus, "submitted"),
+            trainingEventNotDeletedCondition(),
+          ),
+        )
+        .returning({ id: trainingEvents.id });
+
+      const scopedEmployeeRows = await db
+        .select({ id: employees.id })
+        .from(employees)
+        .where(and(inArray(employees.unitId, scopeUnitIds), employeeNotDeletedCondition()));
+      const scopedEmployeeIds = scopedEmployeeRows.map((row) => row.id);
+      const attendanceDeleted =
+        scopedEmployeeIds.length === 0
+          ? []
+          : await db
+              .update(attendanceRecords)
+              .set({
+                deletedAt,
+                deletedBy: req.user!.id,
+                deleteReason,
+                updatedAt: deletedAt,
+                updatedBy: req.user!.id,
+              })
+              .where(
+                and(
+                  inArray(attendanceRecords.employeeId, scopedEmployeeIds),
+                  eq(attendanceRecords.workflowStatus, "submitted"),
+                  attendanceNotDeletedCondition(),
+                ),
+              )
+              .returning({ id: attendanceRecords.id });
+
+      await logAudit({
+        actorUserId: req.user!.id,
+        action: "approvals.pending.bulk_delete",
+        entityType: "approvals_queue",
+        entityId: null,
+        afterJson: {
+          trainingDeleted: trainingDeleted.length,
+          attendanceDeleted: attendanceDeleted.length,
+        },
+        ip: req.ip,
+      });
+
+      res.json({
+        trainingDeleted: trainingDeleted.length,
+        attendanceDeleted: attendanceDeleted.length,
+      });
+    },
+  );
+
   api.get(
     "/approvals",
     requireRole(["super_admin", "hr_qa_approver"]),
@@ -3445,6 +3774,119 @@ export async function registerRoutes(
                   eq(attendanceRecords.workflowStatus, "submitted"),
                 ),
               );
+
+      const enrichAttendanceWithImportMeta = async (
+        rows: Array<typeof attendanceRecords.$inferSelect>,
+      ) => {
+        const toAttendanceDateKey = (value: string | Date | null | undefined) => {
+          if (!value) return "";
+          if (value instanceof Date) {
+            return value.toISOString().slice(0, 10);
+          }
+          return value.slice(0, 10);
+        };
+
+        if (rows.length === 0) {
+          return [];
+        }
+
+        const trainingEventIds = Array.from(
+          new Set(rows.map((row) => row.trainingEventId)),
+        );
+        const committedBatches =
+          trainingEventIds.length === 0
+            ? []
+            : await db
+                .select({
+                  id: attendanceImportBatches.id,
+                  trainingEventId: attendanceImportBatches.trainingEventId,
+                  fileName: attendanceImportBatches.fileName,
+                  createdAt: attendanceImportBatches.createdAt,
+                })
+                .from(attendanceImportBatches)
+                .where(
+                  and(
+                    inArray(attendanceImportBatches.trainingEventId, trainingEventIds),
+                    eq(attendanceImportBatches.status, "committed"),
+                  ),
+                );
+
+        if (committedBatches.length === 0) {
+          return rows.map((row) => ({
+            ...row,
+            importBatchId: null,
+            importBatchFileName: null,
+            importBatchCreatedAt: null,
+          }));
+        }
+
+        const batchById = new Map(committedBatches.map((batch) => [batch.id, batch]));
+        const committedBatchIds = committedBatches.map((batch) => batch.id);
+        const importRows =
+          committedBatchIds.length === 0
+            ? []
+            : await db
+                .select({
+                  batchId: attendanceImportRows.batchId,
+                  resolvedEmployeeId: attendanceImportRows.resolvedEmployeeId,
+                  rawRowJson: attendanceImportRows.rawRowJson,
+                })
+                .from(attendanceImportRows)
+                .where(
+                  and(
+                    inArray(attendanceImportRows.batchId, committedBatchIds),
+                    eq(attendanceImportRows.matchStatus, "matched"),
+                  ),
+                );
+
+        const importMetaByAttendanceKey = new Map<
+          string,
+          { id: string; fileName: string; createdAt: Date | null }
+        >();
+
+        for (const importRow of importRows) {
+          if (!importRow.resolvedEmployeeId) continue;
+          const batch = batchById.get(importRow.batchId);
+          if (!batch) continue;
+          const raw = importRow.rawRowJson as Record<string, string>;
+          const rawDateValue =
+            raw.Date ||
+            raw.attendance_date ||
+            raw.attendanceDate ||
+            raw["Attendance Date"] ||
+            raw["attendance date"];
+          const parsedDates = parseAttendanceCsvDates(rawDateValue);
+          if (parsedDates.error || parsedDates.dates.length === 0) continue;
+
+          for (const attendanceDate of parsedDates.dates) {
+            const attendanceKey = `${batch.trainingEventId}::${importRow.resolvedEmployeeId}::${toAttendanceDateKey(attendanceDate)}`;
+            const existing = importMetaByAttendanceKey.get(attendanceKey);
+            const existingTime = existing?.createdAt ? new Date(existing.createdAt).getTime() : 0;
+            const nextTime = batch.createdAt ? new Date(batch.createdAt).getTime() : 0;
+            if (!existing || nextTime >= existingTime) {
+              importMetaByAttendanceKey.set(attendanceKey, {
+                id: batch.id,
+                fileName: batch.fileName,
+                createdAt: batch.createdAt,
+              });
+            }
+          }
+        }
+
+        return rows.map((row) => {
+          const attendanceKey = `${row.trainingEventId}::${row.employeeId}::${toAttendanceDateKey(row.attendanceDate)}`;
+          const importMeta = importMetaByAttendanceKey.get(attendanceKey);
+          return {
+            ...row,
+            importBatchId: importMeta?.id ?? null,
+            importBatchFileName: importMeta?.fileName ?? null,
+            importBatchCreatedAt: importMeta?.createdAt ?? null,
+          };
+        });
+      };
+
+      const attendanceSubmittedWithMeta =
+        await enrichAttendanceWithImportMeta(attendanceSubmitted);
       const attendanceApproved =
         employeeIds.length === 0
           ? []
@@ -3478,7 +3920,7 @@ export async function registerRoutes(
           locked: trainingLocked,
         },
         attendance: {
-          submitted: attendanceSubmitted,
+          submitted: attendanceSubmittedWithMeta,
           approved: attendanceApproved,
           locked: attendanceLocked,
         },

@@ -24,7 +24,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Download } from "lucide-react";
-import { useQuery } from "@tanstack/react-query";
+import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { getQueryFn } from "@/lib/queryClient";
 import { LoadingState } from "@/components/ui/loading-state";
 import { Spinner } from "@/components/ui/spinner";
@@ -100,6 +100,7 @@ export default function Reports() {
   } = useQuery<ReportResponse<any>>({
     queryKey: ["/api/reports/hours-by-employee", employeeQuery],
     queryFn: () => fetchReport("/api/reports/hours-by-employee", employeeQuery),
+    placeholderData: keepPreviousData,
   });
   const {
     data: hoursByUnit,
@@ -108,6 +109,7 @@ export default function Reports() {
   } = useQuery<ReportResponse<any>>({
     queryKey: ["/api/reports/hours-by-unit", unitQuery],
     queryFn: () => fetchReport("/api/reports/hours-by-unit", unitQuery),
+    placeholderData: keepPreviousData,
   });
   const handleExport = (endpoint: string) => {
     const exportQuery = `${baseQuery}${baseQuery ? "&" : ""}format=csv`;
@@ -124,7 +126,10 @@ export default function Reports() {
     return `Showing ${start}-${end} of ${pagination.total}`;
   };
 
-  const isPageLoading = unitsLoading || hoursByEmployeeLoading || hoursByUnitLoading;
+  const isPageLoading =
+    unitsLoading ||
+    (!hoursByEmployee && hoursByEmployeeLoading) ||
+    (!hoursByUnit && hoursByUnitLoading);
   const isRefreshing = hoursByEmployeeFetching || hoursByUnitFetching;
 
   if (isPageLoading) {

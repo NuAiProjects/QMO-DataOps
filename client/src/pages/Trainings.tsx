@@ -38,6 +38,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Textarea } from "@/components/ui/textarea";
+import { Spinner } from "@/components/ui/spinner";
 
 type TrainingForm = {
   title: string;
@@ -83,6 +84,22 @@ const formatCategoryLabel = (value: unknown): string => {
   return normalized;
 };
 
+const formatWorkflowLabel = (value: unknown) => {
+  if (typeof value !== "string" || value.trim().length === 0) return "Unknown";
+  return value
+    .split("_")
+    .map((segment) => segment.charAt(0).toUpperCase() + segment.slice(1))
+    .join(" ");
+};
+
+const workflowBadgeClassByStatus: Record<string, string> = {
+  draft: "bg-slate-100 text-slate-700 border-slate-300",
+  returned: "bg-rose-50 text-rose-700 border-rose-200",
+  submitted: "bg-amber-50 text-amber-700 border-amber-200",
+  approved: "bg-emerald-50 text-emerald-700 border-emerald-200",
+  locked: "bg-indigo-50 text-indigo-700 border-indigo-200",
+};
+
 export default function Trainings() {
   const { user } = useUser();
   const { toast } = useToast();
@@ -93,8 +110,13 @@ export default function Trainings() {
   const [archiveDialogOpen, setArchiveDialogOpen] = useState(false);
   const [archiveTargetEvent, setArchiveTargetEvent] = useState<any | null>(null);
   const [archiveReason, setArchiveReason] = useState("");
+  const [isSavingEvent, setIsSavingEvent] = useState(false);
+  const [submittingEventId, setSubmittingEventId] = useState<string | null>(null);
+  const [highlightedEventId, setHighlightedEventId] = useState<string | null>(null);
   const [form, setForm] = useState<TrainingForm>(emptyForm);
+  const focusTrainingId = new URLSearchParams(window.location.search).get("focusTrainingId");
 
+  const isSuperAdmin = user?.role === "super_admin";
   const canCreate = user?.role !== "viewer_auditor";
   const canSubmit = ["encoder", "unit_head", "super_admin"].includes(user?.role || "");
 
@@ -150,6 +172,16 @@ export default function Trainings() {
     }
   }, [units, form.ownerUnitId]);
 
+  useEffect(() => {
+    if (!focusTrainingId) return;
+    if (!events.some((event: any) => event.id === focusTrainingId)) return;
+    setHighlightedEventId(focusTrainingId);
+    const timer = window.setTimeout(() => {
+      setHighlightedEventId((current) => (current === focusTrainingId ? null : current));
+    }, 5000);
+    return () => window.clearTimeout(timer);
+  }, [focusTrainingId, events]);
+
   const resetForm = () => {
     setForm(emptyForm);
     setEditingEventId(null);
@@ -202,6 +234,10 @@ export default function Trainings() {
       toast({ variant: "destructive", title: "Start and end dates are required." });
       return;
     }
+    if (new Date(form.startDate).getTime() > new Date(form.endDate).getTime()) {
+      toast({ variant: "destructive", title: "Start date must be on or before end date." });
+      return;
+    }
     if (!ownerUnitId) {
       toast({ variant: "destructive", title: "No owner unit available for your account." });
       return;
@@ -224,6 +260,7 @@ export default function Trainings() {
     }
 
     try {
+      setIsSavingEvent(true);
       const payload = {
         title: form.title.trim(),
         description: form.description?.trim() || null,
@@ -258,13 +295,20 @@ export default function Trainings() {
         title: editingEventId ? "Failed to update event" : "Failed to create event",
         description: message.replace(/^Error:\s*/, ""),
       });
+    } finally {
+      setIsSavingEvent(false);
     }
   };
 
   const handleSubmit = async (eventId: string) => {
-    await apiRequest("POST", `/api/training-events/${eventId}/submit`);
-    queryClient.invalidateQueries({ queryKey: ["/api/training-events"] });
-    queryClient.invalidateQueries({ queryKey: ["/api/approvals"] });
+    try {
+      setSubmittingEventId(eventId);
+      await apiRequest("POST", `/api/training-events/${eventId}/submit`);
+      queryClient.invalidateQueries({ queryKey: ["/api/training-events"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/approvals"] });
+    } finally {
+      setSubmittingEventId(null);
+    }
   };
 
   const handleArchive = async () => {
@@ -318,74 +362,92 @@ export default function Trainings() {
                 </DialogDescription>
               </DialogHeader>
               <div className="space-y-3">
-                <Input
-                  placeholder="Title"
-                  value={form.title}
-                  onChange={(event) => setForm((prev) => ({ ...prev, title: event.target.value }))}
-                />
-                <Select
-                  value={form.category}
-                  onValueChange={(value) =>
-                    setForm((prev) => ({ ...prev, category: value, provider: "" }))
-                  }
-                >
-                  <SelectTrigger>
-                    <SelectValue placeholder="Category" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="internal">Internal</SelectItem>
-                    <SelectItem value="external">External</SelectItem>
-                  </SelectContent>
-                </Select>
-                {form.category === "external" ? (
+                <div className="space-y-1.5">
+                  <label className="text-sm font-medium">Title</label>
                   <Input
-                    placeholder="External Provider"
-                    value={form.provider}
-                    onChange={(event) =>
-                      setForm((prev) => ({ ...prev, provider: event.target.value }))
-                    }
+                    value={form.title}
+                    onChange={(event) => setForm((prev) => ({ ...prev, title: event.target.value }))}
                   />
-                ) : (
+                </div>
+                <div className="space-y-1.5">
+                  <label className="text-sm font-medium">Category</label>
                   <Select
-                    value={form.provider}
-                    onValueChange={(value) => setForm((prev) => ({ ...prev, provider: value }))}
+                    value={form.category}
+                    onValueChange={(value) =>
+                      setForm((prev) => ({ ...prev, category: value, provider: "" }))
+                    }
                   >
                     <SelectTrigger>
-                      <SelectValue placeholder="Provider (Department/College)" />
+                      <SelectValue placeholder="Category" />
                     </SelectTrigger>
                     <SelectContent>
-                      {providerOptions.length > 0 ? (
-                        providerOptions.map((providerName) => (
-                          <SelectItem key={providerName} value={providerName}>
-                            {providerName}
-                          </SelectItem>
-                        ))
-                      ) : (
-                        <SelectItem value="__no_provider_options__" disabled>
-                          No department/college options available
-                        </SelectItem>
-                      )}
+                      <SelectItem value="internal">Internal</SelectItem>
+                      <SelectItem value="external">External</SelectItem>
                     </SelectContent>
                   </Select>
+                </div>
+                {form.category === "external" ? (
+                  <div className="space-y-1.5">
+                    <label className="text-sm font-medium">External Provider</label>
+                    <Input
+                      value={form.provider}
+                      onChange={(event) =>
+                        setForm((prev) => ({ ...prev, provider: event.target.value }))
+                      }
+                    />
+                  </div>
+                ) : (
+                  <div className="space-y-1.5">
+                    <label className="text-sm font-medium">Provider (Department/College)</label>
+                    <Select
+                      value={form.provider}
+                      onValueChange={(value) => setForm((prev) => ({ ...prev, provider: value }))}
+                    >
+                      <SelectTrigger>
+                        <SelectValue placeholder="Provider (Department/College)" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {providerOptions.length > 0 ? (
+                          providerOptions.map((providerName) => (
+                            <SelectItem key={providerName} value={providerName}>
+                              {providerName}
+                            </SelectItem>
+                          ))
+                        ) : (
+                          <SelectItem value="__no_provider_options__" disabled>
+                            No department/college options available
+                          </SelectItem>
+                        )}
+                      </SelectContent>
+                    </Select>
+                  </div>
                 )}
-                <Input
-                  placeholder="Venue"
-                  value={form.venue}
-                  onChange={(event) => setForm((prev) => ({ ...prev, venue: event.target.value }))}
-                />
+                <div className="space-y-1.5">
+                  <label className="text-sm font-medium">Venue</label>
+                  <Input
+                    value={form.venue}
+                    onChange={(event) => setForm((prev) => ({ ...prev, venue: event.target.value }))}
+                  />
+                </div>
                 <div className="grid grid-cols-2 gap-2">
-                  <Input
-                    type="date"
-                    value={form.startDate}
-                    onChange={(event) =>
-                      setForm((prev) => ({ ...prev, startDate: event.target.value }))
-                    }
-                  />
-                  <Input
-                    type="date"
-                    value={form.endDate}
-                    onChange={(event) => setForm((prev) => ({ ...prev, endDate: event.target.value }))}
-                  />
+                  <div className="space-y-1.5">
+                    <label className="text-sm font-medium">Start Date</label>
+                    <Input
+                      type="date"
+                      value={form.startDate}
+                      onChange={(event) =>
+                        setForm((prev) => ({ ...prev, startDate: event.target.value }))
+                      }
+                    />
+                  </div>
+                  <div className="space-y-1.5">
+                    <label className="text-sm font-medium">End Date</label>
+                    <Input
+                      type="date"
+                      value={form.endDate}
+                      onChange={(event) => setForm((prev) => ({ ...prev, endDate: event.target.value }))}
+                    />
+                  </div>
                 </div>
                 <div className="space-y-2">
                   <label className="text-sm font-medium text-foreground">Hours Credit</label>
@@ -395,36 +457,51 @@ export default function Trainings() {
                     onChange={(event) => setForm((prev) => ({ ...prev, hours: event.target.value }))}
                   />
                 </div>
-                <Select
-                  value={form.deliveryMode}
-                  onValueChange={(value) => setForm((prev) => ({ ...prev, deliveryMode: value }))}
-                >
-                  <SelectTrigger>
-                    <SelectValue placeholder="Delivery Mode" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="in_person">In Person</SelectItem>
-                    <SelectItem value="virtual">Virtual</SelectItem>
-                    <SelectItem value="hybrid">Hybrid</SelectItem>
-                    <SelectItem value="self_paced">Self Paced</SelectItem>
-                  </SelectContent>
-                </Select>
-                <Select
-                  value={form.isMandatory ? "yes" : "no"}
-                  onValueChange={(value) =>
-                    setForm((prev) => ({ ...prev, isMandatory: value === "yes" }))
-                  }
-                >
-                  <SelectTrigger>
-                    <SelectValue placeholder="Mandatory" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="yes">Mandatory</SelectItem>
-                    <SelectItem value="no">Optional</SelectItem>
-                  </SelectContent>
-                </Select>
-                <Button onClick={handleCreateOrUpdate}>
-                  {editingEventId ? "Save Changes" : "Create Training/Workshop"}
+                <div className="space-y-1.5">
+                  <label className="text-sm font-medium">Delivery Mode</label>
+                  <Select
+                    value={form.deliveryMode}
+                    onValueChange={(value) => setForm((prev) => ({ ...prev, deliveryMode: value }))}
+                  >
+                    <SelectTrigger>
+                      <SelectValue placeholder="Delivery Mode" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="in_person">In Person</SelectItem>
+                      <SelectItem value="virtual">Virtual</SelectItem>
+                      <SelectItem value="hybrid">Hybrid</SelectItem>
+                      <SelectItem value="self_paced">Self Paced</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="space-y-1.5">
+                  <label className="text-sm font-medium">Attendance Requirement</label>
+                  <Select
+                    value={form.isMandatory ? "yes" : "no"}
+                    onValueChange={(value) =>
+                      setForm((prev) => ({ ...prev, isMandatory: value === "yes" }))
+                    }
+                  >
+                    <SelectTrigger>
+                      <SelectValue placeholder="Mandatory" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="yes">Mandatory</SelectItem>
+                      <SelectItem value="no">Optional</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                <Button onClick={handleCreateOrUpdate} disabled={isSavingEvent}>
+                  {isSavingEvent ? (
+                    <>
+                      <Spinner className="mr-2 h-4 w-4" />
+                      Saving...
+                    </>
+                  ) : editingEventId ? (
+                    "Save Changes"
+                  ) : (
+                    "Create Training/Workshop"
+                  )}
                 </Button>
               </div>
             </DialogContent>
@@ -448,9 +525,15 @@ export default function Trainings() {
 
       <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-3">
         {filtered.map((event: any) => {
-          const canEdit = event.workflowStatus === "draft" || event.workflowStatus === "returned";
+          const canEdit =
+            isSuperAdmin || event.workflowStatus === "draft" || event.workflowStatus === "returned";
           return (
-            <Card key={event.id} className="group border-border/60 transition-all hover:shadow-lg">
+            <Card
+              key={event.id}
+              className={`group border-border/60 transition-all hover:shadow-lg ${
+                highlightedEventId === event.id ? "ring-2 ring-primary/50 bg-primary/5" : ""
+              }`}
+            >
               <CardHeader>
                 <div className="flex items-start justify-between">
                   <Badge variant="outline" className="mb-2 w-fit border-primary/20 bg-primary/5 text-primary">
@@ -511,11 +594,28 @@ export default function Trainings() {
               </CardContent>
               <CardFooter className="border-t bg-muted/20 pt-2">
                 <div className="flex w-full items-center justify-between">
-                  <Badge variant="outline">{event.workflowStatus}</Badge>
+                  <Badge
+                    variant="outline"
+                    className={workflowBadgeClassByStatus[event.workflowStatus] || "bg-muted text-foreground border-border"}
+                  >
+                    {formatWorkflowLabel(event.workflowStatus)}
+                  </Badge>
                   <div className="flex items-center gap-2">
                     {canSubmit && (event.workflowStatus === "draft" || event.workflowStatus === "returned") ? (
-                      <Button variant="outline" size="sm" onClick={() => handleSubmit(event.id)}>
-                        Submit
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => handleSubmit(event.id)}
+                        disabled={submittingEventId === event.id}
+                      >
+                        {submittingEventId === event.id ? (
+                          <>
+                            <Spinner className="mr-2 h-4 w-4" />
+                            Submitting...
+                          </>
+                        ) : (
+                          "Submit"
+                        )}
                       </Button>
                     ) : null}
                     <Button variant="link" size="sm" className="h-auto p-0" onClick={() => setDetailsEvent(event)}>

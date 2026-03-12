@@ -22,18 +22,30 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Textarea } from "@/components/ui/textarea";
+import { Spinner } from "@/components/ui/spinner";
 
 type ApprovalState = "submitted" | "approved" | "locked";
 
+type ApprovalParticipant = {
+  id: string;
+  email: string;
+  fullName: string;
+  attendanceDate: string;
+  attendanceStatus: string;
+  hoursCredited: string;
+};
+
 type ApprovalItem = {
   id: string;
-  type: "training" | "attendance";
+  type: "training" | "attendance" | "attendance_batch";
   state: ApprovalState;
   title: string;
   subtitle: string;
   purpose: string;
   fields: Array<{ label: string; value: string }>;
   returnNotes?: string | null;
+  recordIds?: string[];
+  participants?: ApprovalParticipant[];
 };
 
 const formatDate = (value?: string | null) => {
@@ -77,11 +89,13 @@ const stateBadgeClassByState: Record<ApprovalState, string> = {
 const typeBadgeClassByType: Record<ApprovalItem["type"], string> = {
   training: "bg-blue-50 text-blue-600 border-blue-200",
   attendance: "bg-indigo-50 text-indigo-600 border-indigo-200",
+  attendance_batch: "bg-violet-50 text-violet-600 border-violet-200",
 };
 
 export default function Approvals() {
   const [returnDialogItem, setReturnDialogItem] = useState<ApprovalItem | null>(null);
   const [returnNotes, setReturnNotes] = useState("");
+  const [pendingActionKey, setPendingActionKey] = useState<string | null>(null);
   const { data, isLoading: approvalsLoading } = useQuery<any>({
     queryKey: ["/api/approvals"],
     queryFn: getQueryFn({ on401: "throw" }),
@@ -157,7 +171,7 @@ export default function Approvals() {
       purpose: "Review attendance details and confirm this participant record is valid.",
       fields: [
         { label: "Record Type", value: "Attendance Record" },
-        { label: "Employee No", value: employee?.employeeNo || record.employeeId || "N/A" },
+        { label: "Email", value: employee?.email || employee?.employeeNo || "N/A" },
         { label: "Employee Name", value: employee?.fullName || "Unknown employee" },
         { label: "Training Event", value: trainingEvent?.title || "Unknown training" },
         { label: "Attendance Date", value: formatDate(record.attendanceDate) },
@@ -169,9 +183,93 @@ export default function Approvals() {
     };
   };
 
+  const mapAttendanceBatchItem = (records: any[], state: ApprovalState): ApprovalItem => {
+    const firstRecord = records[0];
+    const trainingEvent = trainingById.get(firstRecord?.trainingEventId);
+    const attendanceDates = Array.from(
+      new Set(records.map((record) => formatDate(record.attendanceDate))),
+    ).join(", ");
+    const participants: ApprovalParticipant[] = records.map((record) => {
+      const employee = employeeById.get(record.employeeId);
+      return {
+        id: record.id,
+        email: employee?.email || employee?.employeeNo || "N/A",
+        fullName: employee?.fullName || "Unknown employee",
+        attendanceDate: formatDate(record.attendanceDate),
+        attendanceStatus: formatEnum(record.attendanceStatus),
+        hoursCredited: String(record.hoursCredited ?? "N/A"),
+      };
+    });
+
+    return {
+      id: firstRecord.importBatchId || `batch-${firstRecord.trainingEventId}`,
+      type: "attendance_batch",
+      state,
+      title: trainingEvent?.title || "Bulk Attendance Upload",
+      subtitle: `Batch upload | ${participants.length} participant${participants.length === 1 ? "" : "s"}`,
+      purpose:
+        "Review the participant list from this bulk upload, then approve or return the whole batch at once.",
+      fields: [
+        { label: "Record Type", value: "Attendance Import Batch" },
+        { label: "Training Event", value: trainingEvent?.title || "Unknown training" },
+        { label: "Participants", value: String(participants.length) },
+        { label: "Attendance Date(s)", value: attendanceDates || "N/A" },
+        { label: "Source File", value: firstRecord.importBatchFileName || "CSV upload" },
+        { label: "Imported At", value: formatDate(firstRecord.importBatchCreatedAt) },
+      ],
+      returnNotes: firstRecord.returnNotes,
+      recordIds: records.map((record) => record.id),
+      participants,
+    };
+  };
+
+  const submittedAttendanceRecords = attendance.submitted as any[];
+  const attendanceBatchMap = new Map<
+    string,
+    { batchId: string; records: any[]; batchCreatedAt?: string | null }
+  >();
+  const individualSubmittedAttendance: any[] = [];
+
+  for (const record of submittedAttendanceRecords) {
+    if (!record.importBatchId) {
+      individualSubmittedAttendance.push(record);
+      continue;
+    }
+    const existing = attendanceBatchMap.get(record.importBatchId);
+    if (existing) {
+      existing.records.push(record);
+    } else {
+      attendanceBatchMap.set(record.importBatchId, {
+        batchId: record.importBatchId,
+        records: [record],
+        batchCreatedAt: record.importBatchCreatedAt,
+      });
+    }
+  }
+
+  const submittedAttendanceBatchItems: ApprovalItem[] = [];
+  for (const entry of attendanceBatchMap.values()) {
+    if (entry.records.length <= 1) {
+      individualSubmittedAttendance.push(entry.records[0]);
+      continue;
+    }
+    submittedAttendanceBatchItems.push(mapAttendanceBatchItem(entry.records, "submitted"));
+  }
+
+  submittedAttendanceBatchItems.sort((a, b) => {
+    const aRecord = a.recordIds?.[0];
+    const bRecord = b.recordIds?.[0];
+    const aRaw = submittedAttendanceRecords.find((record) => record.id === aRecord);
+    const bRaw = submittedAttendanceRecords.find((record) => record.id === bRecord);
+    const aTime = aRaw?.importBatchCreatedAt ? new Date(aRaw.importBatchCreatedAt).getTime() : 0;
+    const bTime = bRaw?.importBatchCreatedAt ? new Date(bRaw.importBatchCreatedAt).getTime() : 0;
+    return bTime - aTime;
+  });
+
   const pendingItems: ApprovalItem[] = [
     ...training.submitted.map((event: any) => mapTrainingItem(event, "submitted")),
-    ...attendance.submitted.map((record: any) => mapAttendanceItem(record, "submitted")),
+    ...submittedAttendanceBatchItems,
+    ...individualSubmittedAttendance.map((record: any) => mapAttendanceItem(record, "submitted")),
   ];
 
   const approvedItems: ApprovalItem[] = [
@@ -189,23 +287,50 @@ export default function Approvals() {
     return <LoadingState label="Loading approvals..." className="min-h-[420px]" />;
   }
 
+  const getActionKey = (item: ApprovalItem, action: "approve" | "return" | "lock" | "reopen") =>
+    `${item.type}:${item.id}:${action}`;
+
   const handleApprove = async (item: ApprovalItem) => {
-    if (item.type === "training") {
-      await apiRequest("POST", `/api/training-events/${item.id}/approve`);
-    } else {
-      await apiRequest("POST", `/api/attendance/${item.id}/approve`);
+    const actionKey = getActionKey(item, "approve");
+    try {
+      setPendingActionKey(actionKey);
+      if (item.type === "training") {
+        await apiRequest("POST", `/api/training-events/${item.id}/approve`);
+      } else if (item.type === "attendance_batch") {
+        await Promise.all(
+          (item.recordIds || []).map((recordId) =>
+            apiRequest("POST", `/api/attendance/${recordId}/approve`),
+          ),
+        );
+      } else {
+        await apiRequest("POST", `/api/attendance/${item.id}/approve`);
+      }
+      queryClient.invalidateQueries({ queryKey: ["/api/approvals"] });
+    } finally {
+      setPendingActionKey(null);
     }
-    queryClient.invalidateQueries({ queryKey: ["/api/approvals"] });
   };
 
   const handleReturn = async (item: ApprovalItem, notes: string) => {
     if (!notes.trim()) return;
-    if (item.type === "training") {
-      await apiRequest("POST", `/api/training-events/${item.id}/return`, { notes: notes.trim() });
-    } else {
-      await apiRequest("POST", `/api/attendance/${item.id}/return`, { notes: notes.trim() });
+    const actionKey = getActionKey(item, "return");
+    try {
+      setPendingActionKey(actionKey);
+      if (item.type === "training") {
+        await apiRequest("POST", `/api/training-events/${item.id}/return`, { notes: notes.trim() });
+      } else if (item.type === "attendance_batch") {
+        await Promise.all(
+          (item.recordIds || []).map((recordId) =>
+            apiRequest("POST", `/api/attendance/${recordId}/return`, { notes: notes.trim() }),
+          ),
+        );
+      } else {
+        await apiRequest("POST", `/api/attendance/${item.id}/return`, { notes: notes.trim() });
+      }
+      queryClient.invalidateQueries({ queryKey: ["/api/approvals"] });
+    } finally {
+      setPendingActionKey(null);
     }
-    queryClient.invalidateQueries({ queryKey: ["/api/approvals"] });
   };
 
   const handleLock = async (item: ApprovalItem) => {
@@ -236,7 +361,11 @@ export default function Approvals() {
           </div>
           <div className="flex items-center gap-2">
             <Badge variant="outline" className={typeBadgeClassByType[item.type]}>
-              {item.type === "training" ? "Training" : "Attendance"}
+              {item.type === "training"
+                ? "Training"
+                : item.type === "attendance_batch"
+                  ? "Attendance Batch"
+                  : "Attendance"}
             </Badge>
             <Badge variant="outline" className={stateBadgeClassByState[item.state]}>
               {formatStateLabel(item.state)}
@@ -262,6 +391,31 @@ export default function Approvals() {
           ))}
         </div>
 
+        {item.type === "attendance_batch" && item.participants && item.participants.length > 0 ? (
+          <div className="space-y-2 rounded-md border bg-background p-3">
+            <div className="text-sm font-medium">Participants in this batch</div>
+            <div className="max-h-64 overflow-y-auto rounded-md border">
+              <div className="grid grid-cols-5 gap-2 border-b bg-muted/30 px-3 py-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                <span>Email</span>
+                <span className="col-span-2">Name</span>
+                <span>Status</span>
+                <span>Hours</span>
+              </div>
+              {item.participants.map((participant) => (
+                <div
+                  key={participant.id}
+                  className="grid grid-cols-5 gap-2 border-b px-3 py-2 text-sm last:border-b-0"
+                >
+                  <span>{participant.email}</span>
+                  <span className="col-span-2">{participant.fullName}</span>
+                  <span>{participant.attendanceStatus}</span>
+                  <span>{participant.hoursCredited}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : null}
+
         {item.returnNotes ? (
           <div className="rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
             <span className="font-semibold">Return notes:</span> {item.returnNotes}
@@ -274,6 +428,7 @@ export default function Approvals() {
               <Button
                 variant="outline"
                 className="text-destructive hover:text-destructive hover:bg-destructive/10"
+                disabled={pendingActionKey === getActionKey(item, "return")}
                 onClick={() => {
                   setReturnDialogItem(item);
                   setReturnNotes(item.returnNotes || "");
@@ -284,10 +439,20 @@ export default function Approvals() {
               </Button>
               <Button
                 className="bg-emerald-600 hover:bg-emerald-700"
+                disabled={pendingActionKey === getActionKey(item, "approve")}
                 onClick={() => handleApprove(item)}
               >
-                <CheckCircle2 className="mr-2 h-4 w-4" />
-                Approve
+                {pendingActionKey === getActionKey(item, "approve") ? (
+                  <>
+                    <Spinner className="mr-2 h-4 w-4" />
+                    Approving...
+                  </>
+                ) : (
+                  <>
+                    <CheckCircle2 className="mr-2 h-4 w-4" />
+                    Approve
+                  </>
+                )}
               </Button>
             </>
           ) : null}
@@ -366,7 +531,9 @@ export default function Approvals() {
           <DialogHeader>
             <DialogTitle>Return for Revision</DialogTitle>
             <DialogDescription>
-              Provide clear return notes for this record.
+              {returnDialogItem?.type === "attendance_batch"
+                ? "Provide clear return notes for the whole attendance batch."
+                : "Provide clear return notes for this record."}
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-3">
@@ -376,7 +543,13 @@ export default function Approvals() {
               placeholder="Explain what needs to be corrected."
             />
             <Button
-              disabled={!returnNotes.trim() || !returnDialogItem}
+              disabled={
+                !returnNotes.trim() ||
+                !returnDialogItem ||
+                (returnDialogItem
+                  ? pendingActionKey === getActionKey(returnDialogItem, "return")
+                  : false)
+              }
               onClick={async () => {
                 if (!returnDialogItem) return;
                 await handleReturn(returnDialogItem, returnNotes);
@@ -384,7 +557,14 @@ export default function Approvals() {
                 setReturnNotes("");
               }}
             >
-              Send Back
+              {returnDialogItem && pendingActionKey === getActionKey(returnDialogItem, "return") ? (
+                <>
+                  <Spinner className="mr-2 h-4 w-4" />
+                  Sending...
+                </>
+              ) : (
+                "Send Back"
+              )}
             </Button>
           </div>
         </DialogContent>

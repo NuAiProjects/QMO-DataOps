@@ -37,6 +37,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { LoadingState } from "@/components/ui/loading-state";
+import { Spinner } from "@/components/ui/spinner";
 import { Plus } from "lucide-react";
 
 type Role =
@@ -103,12 +104,19 @@ export default function Users() {
   const [changePasswordOpen, setChangePasswordOpen] = useState(false);
   const [currentPassword, setCurrentPassword] = useState("");
   const [myNewPassword, setMyNewPassword] = useState("");
+  const [myConfirmPassword, setMyConfirmPassword] = useState("");
   const [form, setForm] = useState(defaultForm);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [isSavingUser, setIsSavingUser] = useState(false);
+  const [isSettingPassword, setIsSettingPassword] = useState(false);
+  const [isChangingMyPassword, setIsChangingMyPassword] = useState(false);
   const canManageUsers = user?.role === "super_admin";
   const isSetPasswordValid = newPassword.length >= MIN_PASSWORD_LENGTH;
   const isMyNewPasswordValid = myNewPassword.length >= MIN_PASSWORD_LENGTH;
-  const canSubmitChangeMyPassword = currentPassword.length > 0 && isMyNewPasswordValid;
+  const doMyPasswordsMatch = myNewPassword === myConfirmPassword;
+  const myPasswordMismatch = myConfirmPassword.length > 0 && !doMyPasswordsMatch;
+  const canSubmitChangeMyPassword =
+    currentPassword.length > 0 && isMyNewPasswordValid && doMyPasswordsMatch;
 
   const { data, isLoading: usersLoading } = useQuery<{ users: UserRow[] }>({
     queryKey: ["/api/users"],
@@ -151,6 +159,7 @@ export default function Users() {
 
   const submitForm = async () => {
     setErrorMessage(null);
+    setIsSavingUser(true);
     try {
       const payload = {
         email: form.email.trim(),
@@ -169,6 +178,8 @@ export default function Users() {
       setDialogOpen(false);
     } catch (error) {
       setErrorMessage(parseApiError(error));
+    } finally {
+      setIsSavingUser(false);
     }
   };
 
@@ -193,6 +204,7 @@ export default function Users() {
     if (!open) {
       setCurrentPassword("");
       setMyNewPassword("");
+      setMyConfirmPassword("");
     }
     setErrorMessage(null);
   };
@@ -200,6 +212,7 @@ export default function Users() {
   const submitSetPassword = async () => {
     if (!passwordTargetUserId) return;
     setErrorMessage(null);
+    setIsSettingPassword(true);
     try {
       await apiRequest("POST", `/api/users/${passwordTargetUserId}/password`, {
         password: newPassword,
@@ -209,11 +222,18 @@ export default function Users() {
       setNewPassword("");
     } catch (error) {
       setErrorMessage(parseApiError(error));
+    } finally {
+      setIsSettingPassword(false);
     }
   };
 
   const submitChangeMyPassword = async () => {
+    if (!doMyPasswordsMatch) {
+      setErrorMessage("New password and confirmation do not match.");
+      return;
+    }
     setErrorMessage(null);
+    setIsChangingMyPassword(true);
     try {
       await apiRequest("POST", "/api/auth/change-password", {
         currentPassword,
@@ -222,8 +242,11 @@ export default function Users() {
       setChangePasswordOpen(false);
       setCurrentPassword("");
       setMyNewPassword("");
+      setMyConfirmPassword("");
     } catch (error) {
       setErrorMessage(parseApiError(error));
+    } finally {
+      setIsChangingMyPassword(false);
     }
   };
 
@@ -252,18 +275,30 @@ export default function Users() {
                     {errorMessage}
                   </div>
                 ) : null}
-                <Input
-                  type="password"
-                  placeholder="Current password"
-                  value={currentPassword}
-                  onChange={(event) => setCurrentPassword(event.target.value)}
-                />
-                <Input
-                  type="password"
-                  placeholder={`New password (min ${MIN_PASSWORD_LENGTH} characters)`}
-                  value={myNewPassword}
-                  onChange={(event) => setMyNewPassword(event.target.value)}
-                />
+                <div className="space-y-1.5">
+                  <label className="text-sm font-medium">Current Password</label>
+                  <Input
+                    type="password"
+                    value={currentPassword}
+                    onChange={(event) => setCurrentPassword(event.target.value)}
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <label className="text-sm font-medium">New Password</label>
+                  <Input
+                    type="password"
+                    value={myNewPassword}
+                    onChange={(event) => setMyNewPassword(event.target.value)}
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <label className="text-sm font-medium">Confirm New Password</label>
+                  <Input
+                    type="password"
+                    value={myConfirmPassword}
+                    onChange={(event) => setMyConfirmPassword(event.target.value)}
+                  />
+                </div>
                 <p
                   className={`text-xs ${
                     isMyNewPasswordValid ? "text-emerald-600" : "text-muted-foreground"
@@ -273,8 +308,21 @@ export default function Users() {
                     ? "Password length is valid."
                     : `Use at least ${MIN_PASSWORD_LENGTH} characters.`}
                 </p>
-                <Button onClick={submitChangeMyPassword} disabled={!canSubmitChangeMyPassword}>
-                  Update Password
+                {myPasswordMismatch ? (
+                  <p className="text-xs text-destructive">New password and confirmation do not match.</p>
+                ) : null}
+                <Button
+                  onClick={submitChangeMyPassword}
+                  disabled={!canSubmitChangeMyPassword || isChangingMyPassword}
+                >
+                  {isChangingMyPassword ? (
+                    <>
+                      <Spinner className="mr-2 h-4 w-4" />
+                      Updating...
+                    </>
+                  ) : (
+                    "Update Password"
+                  )}
                 </Button>
               </div>
             </DialogContent>
@@ -300,37 +348,44 @@ export default function Users() {
                     {errorMessage}
                   </div>
                 ) : null}
-                <Input
-                  placeholder="Email"
-                  value={form.email}
-                  onChange={(event) =>
-                    setForm((prev) => ({ ...prev, email: event.target.value }))
-                  }
-                />
-                <Input
-                  placeholder="Full name"
-                  value={form.fullName}
-                  onChange={(event) =>
-                    setForm((prev) => ({ ...prev, fullName: event.target.value }))
-                  }
-                />
-                <Select
-                  value={form.role}
-                  onValueChange={(value) =>
-                    setForm((prev) => ({ ...prev, role: value as Role }))
-                  }
-                >
-                  <SelectTrigger>
-                    <SelectValue placeholder="Select role" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {roleOptions.map((role) => (
-                      <SelectItem key={role.value} value={role.value}>
-                        {role.label}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
+                <div className="space-y-1.5">
+                  <label className="text-sm font-medium">Email</label>
+                  <Input
+                    value={form.email}
+                    onChange={(event) =>
+                      setForm((prev) => ({ ...prev, email: event.target.value }))
+                    }
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <label className="text-sm font-medium">Full Name</label>
+                  <Input
+                    value={form.fullName}
+                    onChange={(event) =>
+                      setForm((prev) => ({ ...prev, fullName: event.target.value }))
+                    }
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <label className="text-sm font-medium">Role</label>
+                  <Select
+                    value={form.role}
+                    onValueChange={(value) =>
+                      setForm((prev) => ({ ...prev, role: value as Role }))
+                    }
+                  >
+                    <SelectTrigger>
+                      <SelectValue placeholder="Select role" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {roleOptions.map((role) => (
+                        <SelectItem key={role.value} value={role.value}>
+                          {role.label}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
                 <div className="flex items-center gap-2 rounded-md border p-3">
                   <Checkbox
                     id="is-active"
@@ -367,7 +422,18 @@ export default function Users() {
                     })}
                   </div>
                 </div>
-                <Button onClick={submitForm}>{editingUserId ? "Save Changes" : "Create User"}</Button>
+                <Button onClick={submitForm} disabled={isSavingUser}>
+                  {isSavingUser ? (
+                    <>
+                      <Spinner className="mr-2 h-4 w-4" />
+                      Saving...
+                    </>
+                  ) : editingUserId ? (
+                    "Save Changes"
+                  ) : (
+                    "Create User"
+                  )}
+                </Button>
               </div>
             </DialogContent>
           </Dialog>
@@ -448,12 +514,14 @@ export default function Users() {
                 {errorMessage}
               </div>
             ) : null}
-            <Input
-              type="password"
-              placeholder={`New password (min ${MIN_PASSWORD_LENGTH} characters)`}
-              value={newPassword}
-              onChange={(event) => setNewPassword(event.target.value)}
-            />
+            <div className="space-y-1.5">
+              <label className="text-sm font-medium">New Password</label>
+              <Input
+                type="password"
+                value={newPassword}
+                onChange={(event) => setNewPassword(event.target.value)}
+              />
+            </div>
             <p
               className={`text-xs ${
                 isSetPasswordValid ? "text-emerald-600" : "text-muted-foreground"
@@ -463,8 +531,15 @@ export default function Users() {
                 ? "Password length is valid."
                 : `Use at least ${MIN_PASSWORD_LENGTH} characters.`}
             </p>
-            <Button onClick={submitSetPassword} disabled={!isSetPasswordValid}>
-              Save Password
+            <Button onClick={submitSetPassword} disabled={!isSetPasswordValid || isSettingPassword}>
+              {isSettingPassword ? (
+                <>
+                  <Spinner className="mr-2 h-4 w-4" />
+                  Saving...
+                </>
+              ) : (
+                "Save Password"
+              )}
             </Button>
           </div>
         </DialogContent>

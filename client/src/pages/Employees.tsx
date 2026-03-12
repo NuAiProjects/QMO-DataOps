@@ -149,8 +149,11 @@ export default function Employees() {
   const [isEditDialogOpen, setIsEditDialogOpen] = useState(false);
   const [isBulkUploading, setIsBulkUploading] = useState(false);
   const [isArchiveDialogOpen, setIsArchiveDialogOpen] = useState(false);
+  const [statusUpdatingEmployeeId, setStatusUpdatingEmployeeId] = useState<string | null>(null);
+  const [highlightedEmployeeId, setHighlightedEmployeeId] = useState<string | null>(null);
   const [archiveReason, setArchiveReason] = useState("");
   const employeeCsvInputRef = useRef<HTMLInputElement | null>(null);
+  const focusEmployeeId = new URLSearchParams(window.location.search).get("focusEmployeeId");
 
   const [createForm, setCreateForm] = useState<EmployeeForm>({
     fullName: "",
@@ -251,6 +254,18 @@ export default function Employees() {
   useEffect(() => {
     setCurrentPage((prev) => Math.min(prev, totalPages));
   }, [totalPages]);
+
+  useEffect(() => {
+    if (!focusEmployeeId) return;
+    const focusIndex = filteredEmployees.findIndex((employee) => employee.id === focusEmployeeId);
+    if (focusIndex < 0) return;
+    setCurrentPage(Math.floor(focusIndex / EMPLOYEE_PAGE_SIZE) + 1);
+    setHighlightedEmployeeId(focusEmployeeId);
+    const timer = window.setTimeout(() => {
+      setHighlightedEmployeeId((current) => (current === focusEmployeeId ? null : current));
+    }, 5000);
+    return () => window.clearTimeout(timer);
+  }, [focusEmployeeId, filteredEmployees]);
 
   const historyRowsWithTitle = useMemo(() => {
     return [...historyRows].sort((a, b) => b.attendanceDate.localeCompare(a.attendanceDate));
@@ -376,6 +391,7 @@ export default function Employees() {
       employee.employmentStatus === "active" ? "inactive" : "active";
 
     try {
+      setStatusUpdatingEmployeeId(employee.id);
       await apiRequest("PUT", `/api/employees/${employee.id}`, {
         employmentStatus: nextStatus,
       });
@@ -393,6 +409,8 @@ export default function Employees() {
         title: "Status update failed",
         description: getErrorMessage(error),
       });
+    } finally {
+      setStatusUpdatingEmployeeId(null);
     }
   };
 
@@ -587,58 +605,71 @@ export default function Employees() {
                 </DialogDescription>
               </DialogHeader>
               <div className="space-y-3">
-                <Input
-                  placeholder="Full Name"
-                  value={createForm.fullName}
-                  onChange={(e) =>
-                    setCreateForm((prev) => ({ ...prev, fullName: e.target.value }))
-                  }
-                />
-                <Input
-                  placeholder="Email"
-                  value={createForm.email}
-                  onChange={(e) =>
-                    setCreateForm((prev) => ({ ...prev, email: e.target.value }))
-                  }
-                />
-                <Input
-                  placeholder="Position (optional)"
-                  value={createForm.position}
-                  onChange={(e) =>
-                    setCreateForm((prev) => ({ ...prev, position: e.target.value }))
-                  }
-                />
-                <Select
-                  value={createForm.unitId}
-                  onValueChange={(value) =>
-                    setCreateForm((prev) => ({ ...prev, unitId: value }))
-                  }
-                >
-                  <SelectTrigger>
-                    <SelectValue placeholder="Select department" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {units.map((unit) => (
-                      <SelectItem key={unit.id} value={unit.id}>
-                        {unit.name}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-                <Select
-                  value={createForm.employmentStatus}
-                  onValueChange={(value: EmployeeStatus) =>
-                    setCreateForm((prev) => ({ ...prev, employmentStatus: value }))
-                  }
-                >
-                  <SelectTrigger>
-                    <SelectValue placeholder="Status" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="active">Active</SelectItem>
-                    <SelectItem value="inactive">Inactive</SelectItem>
-                  </SelectContent>
-                </Select>
+                <div className="space-y-1.5">
+                  <label className="text-sm font-medium">Full Name</label>
+                  <Input
+                    value={createForm.fullName}
+                    onChange={(e) =>
+                      setCreateForm((prev) => ({ ...prev, fullName: e.target.value }))
+                    }
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <label className="text-sm font-medium">Email</label>
+                  <Input
+                    value={createForm.email}
+                    onChange={(e) =>
+                      setCreateForm((prev) => ({ ...prev, email: e.target.value }))
+                    }
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <label className="text-sm font-medium">Position</label>
+                  <Input
+                    placeholder="Optional"
+                    value={createForm.position}
+                    onChange={(e) =>
+                      setCreateForm((prev) => ({ ...prev, position: e.target.value }))
+                    }
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <label className="text-sm font-medium">Department</label>
+                  <Select
+                    value={createForm.unitId}
+                    onValueChange={(value) =>
+                      setCreateForm((prev) => ({ ...prev, unitId: value }))
+                    }
+                  >
+                    <SelectTrigger>
+                      <SelectValue placeholder="Select department" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {units.map((unit) => (
+                        <SelectItem key={unit.id} value={unit.id}>
+                          {unit.name}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="space-y-1.5">
+                  <label className="text-sm font-medium">Employment Status</label>
+                  <Select
+                    value={createForm.employmentStatus}
+                    onValueChange={(value: EmployeeStatus) =>
+                      setCreateForm((prev) => ({ ...prev, employmentStatus: value }))
+                    }
+                  >
+                    <SelectTrigger>
+                      <SelectValue placeholder="Status" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="active">Active</SelectItem>
+                      <SelectItem value="inactive">Inactive</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
                 <Button onClick={handleCreate}>Create Employee</Button>
               </div>
               </DialogContent>
@@ -737,7 +768,10 @@ export default function Employees() {
               </TableRow>
             ) : (
               paginatedEmployees.map((employee) => (
-                <TableRow key={employee.id}>
+                <TableRow
+                  key={employee.id}
+                  className={highlightedEmployeeId === employee.id ? "bg-primary/5 ring-1 ring-primary/40" : ""}
+                >
                   <TableCell>
                     <div className="flex flex-col">
                       <span className="font-medium">{employee.fullName}</span>
@@ -747,43 +781,74 @@ export default function Employees() {
                   <TableCell>{unitMap.get(employee.unitId) || "-"}</TableCell>
                   <TableCell>{employee.position || "-"}</TableCell>
                   <TableCell>
-                    <Badge
-                      variant="outline"
-                      className={
-                        employee.employmentStatus === "active"
-                          ? "bg-emerald-500/15 text-emerald-700 border-emerald-200"
-                          : "bg-amber-500/15 text-amber-700 border-amber-200"
-                      }
-                    >
-                      {employee.employmentStatus === "active" ? "Active" : "Inactive"}
-                    </Badge>
+                    {statusUpdatingEmployeeId === employee.id ? (
+                      <Badge variant="outline" className="bg-blue-500/10 text-blue-700 border-blue-200">
+                        <Spinner className="mr-1 h-3 w-3" />
+                        Updating...
+                      </Badge>
+                    ) : (
+                      <Badge
+                        variant="outline"
+                        className={
+                          employee.employmentStatus === "active"
+                            ? "bg-emerald-500/15 text-emerald-700 border-emerald-200"
+                            : "bg-amber-500/15 text-amber-700 border-amber-200"
+                        }
+                      >
+                        {employee.employmentStatus === "active" ? "Active" : "Inactive"}
+                      </Badge>
+                    )}
                   </TableCell>
                   <TableCell className="text-right">
                     <DropdownMenu>
                       <DropdownMenuTrigger asChild>
-                        <Button variant="ghost" className="h-8 w-8 p-0">
+                        <Button
+                          variant="ghost"
+                          className="h-8 w-8 p-0"
+                          disabled={statusUpdatingEmployeeId === employee.id}
+                        >
                           <span className="sr-only">Open menu</span>
-                          <MoreHorizontal className="h-4 w-4" />
+                          {statusUpdatingEmployeeId === employee.id ? (
+                            <Spinner className="h-4 w-4" />
+                          ) : (
+                            <MoreHorizontal className="h-4 w-4" />
+                          )}
                         </Button>
                       </DropdownMenuTrigger>
                       <DropdownMenuContent align="end">
-                        <DropdownMenuLabel>Actions</DropdownMenuLabel>
-                        <DropdownMenuItem onSelect={() => openProfileDialog(employee)}>
+                        <DropdownMenuItem
+                          disabled={statusUpdatingEmployeeId === employee.id}
+                          onSelect={() => openProfileDialog(employee)}
+                        >
                           View Profile
                         </DropdownMenuItem>
                         {canEdit ? (
                           <>
-                            <DropdownMenuItem onSelect={() => openEditDialog(employee)}>
+                            <DropdownMenuItem
+                              disabled={statusUpdatingEmployeeId === employee.id}
+                              onSelect={() => openEditDialog(employee)}
+                            >
                               Edit Details
                             </DropdownMenuItem>
                             <DropdownMenuItem
                               className="text-destructive"
+                              disabled={statusUpdatingEmployeeId === employee.id}
                               onSelect={() => handleToggleEmployeeStatus(employee)}
                             >
-                              {employee.employmentStatus === "active" ? "Deactivate" : "Activate"}
+                              {statusUpdatingEmployeeId === employee.id ? (
+                                <span className="flex items-center">
+                                  <Spinner className="mr-2 h-4 w-4" />
+                                  Updating...
+                                </span>
+                              ) : employee.employmentStatus === "active" ? (
+                                "Deactivate"
+                              ) : (
+                                "Activate"
+                              )}
                             </DropdownMenuItem>
                             <DropdownMenuItem
                               className="text-destructive"
+                              disabled={statusUpdatingEmployeeId === employee.id}
                               onSelect={() => {
                                 setSelectedEmployee(employee);
                                 setArchiveReason("");

@@ -57,7 +57,12 @@ function Router() {
         }}
       </Route>
 
-      <Route path="/login" component={Login} />
+      <Route path="/login">
+        {() => {
+          if (isLoading) return <FullScreenLoader label="Checking your session..." />;
+          return user ? <Redirect to="/dashboard" /> : <Login />;
+        }}
+      </Route>
       
       <Route path="/dashboard">
         {() => <ProtectedRoute component={Dashboard} />}

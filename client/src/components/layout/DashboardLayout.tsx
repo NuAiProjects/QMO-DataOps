@@ -26,6 +26,13 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Sheet, SheetContent, SheetTrigger } from "@/components/ui/sheet";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import logo from "@/assets/NUlogo-Dark.png";
 import { Input } from "@/components/ui/input";
 import { Spinner } from "@/components/ui/spinner";
@@ -76,11 +83,13 @@ function formatRelativeTime(value: string) {
 }
 
 export default function DashboardLayout({ children }: { children: React.ReactNode }) {
-  const { user, logout } = useUser();
+  const { user, logout, units } = useUser();
   const [location, navigate] = useLocation();
   const [searchTerm, setSearchTerm] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
   const [searchOpen, setSearchOpen] = useState(false);
+  const [profileOpen, setProfileOpen] = useState(false);
+  const [supportOpen, setSupportOpen] = useState(false);
   const searchContainerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -194,6 +203,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
       (approvalsData?.attendance?.submitted?.length ?? 0)
     : 0;
   const hasNotifications = pendingApprovals > 0 || notifications.length > 0;
+  const scopedUnitNames = (units || []).map((unit: any) => unit.name).filter(Boolean).join(", ");
 
   const handleSelectSearchResult = (href: string) => {
     setSearchTerm("");
@@ -389,11 +399,21 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
               <DropdownMenuContent align="end">
                 <DropdownMenuLabel>My Account</DropdownMenuLabel>
                 <DropdownMenuSeparator />
-                <DropdownMenuItem onSelect={(event) => event.preventDefault()}>
+                <DropdownMenuItem
+                  onSelect={(event) => {
+                    event.preventDefault();
+                    setProfileOpen(true);
+                  }}
+                >
                   <Users className="mr-2 h-4 w-4" />
                   Profile Settings
                 </DropdownMenuItem>
-                <DropdownMenuItem onSelect={(event) => event.preventDefault()}>
+                <DropdownMenuItem
+                  onSelect={(event) => {
+                    event.preventDefault();
+                    setSupportOpen(true);
+                  }}
+                >
                   <File className="mr-2 h-4 w-4" />
                   Help & Support
                 </DropdownMenuItem>
@@ -413,6 +433,60 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
           </div>
         </main>
       </div>
+
+      <Dialog open={profileOpen} onOpenChange={setProfileOpen}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Profile Settings</DialogTitle>
+            <DialogDescription>Review your current account context.</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3 text-sm">
+            <div className="rounded-md border bg-muted/20 p-3">
+              <div>
+                <span className="font-medium">Name:</span> {user.fullName}
+              </div>
+              <div>
+                <span className="font-medium">Email:</span> {user.email}
+              </div>
+              <div>
+                <span className="font-medium">Role:</span> {roleLabels[user.role] ?? user.role}
+              </div>
+              <div>
+                <span className="font-medium">Assigned Units:</span> {scopedUnitNames || "None"}
+              </div>
+            </div>
+            {user.role === "super_admin" ? (
+              <Button
+                variant="outline"
+                onClick={() => {
+                  setProfileOpen(false);
+                  navigate("/users");
+                }}
+              >
+                Open User Management
+              </Button>
+            ) : null}
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={supportOpen} onOpenChange={setSupportOpen}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Help & Support</DialogTitle>
+            <DialogDescription>Get quick help for account and workflow concerns.</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3 text-sm">
+            <div className="rounded-md border bg-muted/20 p-3">
+              <p className="font-medium">Support Email</p>
+              <p className="text-muted-foreground">admin@qmo.local</p>
+            </div>
+            <Button asChild>
+              <a href="mailto:admin@qmo.local">Contact Support</a>
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
