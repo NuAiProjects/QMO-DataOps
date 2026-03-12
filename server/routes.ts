@@ -3386,8 +3386,9 @@ export async function registerRoutes(
       if (!scopeUnitIds.includes(parsed.data.unitId)) {
         return res.status(403).json({ message: "Unit out of scope." });
       }
+      const includeDescendants = parsed.data.includeChildren !== "false";
       allowedUnits =
-        parsed.data.includeChildren === "true"
+        includeDescendants
           ? await getDescendantUnits(parsed.data.unitId, scopeUnitIds)
           : [parsed.data.unitId];
     }
@@ -3452,8 +3453,9 @@ export async function registerRoutes(
       if (!scopeUnitIds.includes(parsed.data.unitId)) {
         return res.status(403).json({ message: "Unit out of scope." });
       }
+      const includeDescendants = parsed.data.includeChildren !== "false";
       allowedUnits =
-        parsed.data.includeChildren === "true"
+        includeDescendants
           ? await getDescendantUnits(parsed.data.unitId, scopeUnitIds)
           : [parsed.data.unitId];
     }
@@ -3543,8 +3545,9 @@ export async function registerRoutes(
       if (!scopeUnitIds.includes(parsed.data.unitId)) {
         return res.status(403).json({ message: "Unit out of scope." });
       }
+      const includeDescendants = parsed.data.includeChildren !== "false";
       allowedUnits =
-        parsed.data.includeChildren === "true"
+        includeDescendants
           ? await getDescendantUnits(parsed.data.unitId, scopeUnitIds)
           : [parsed.data.unitId];
     }
