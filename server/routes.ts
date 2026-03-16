@@ -623,6 +623,151 @@ function toCsv<T extends Record<string, any>>(rows: T[]) {
   return lines.join("\n");
 }
 
+function toSectionedCsv(
+  sections: Array<{ title: string; rows: Array<Record<string, any>> }>,
+) {
+  return sections
+    .map((section) => {
+      const csvBody =
+        section.rows.length > 0 ? toCsv(section.rows) : toCsv([{ message: "No data" }]);
+      return `${section.title}\n${csvBody}`;
+    })
+    .join("\n\n");
+}
+
+function toNumberValue(value: unknown) {
+  const num = Number(value ?? 0);
+  return Number.isFinite(num) ? num : 0;
+}
+
+function roundTo(value: number, digits = 2) {
+  const factor = 10 ** digits;
+  return Math.round(value * factor) / factor;
+}
+
+function formatDeliveryModeLabel(value: string | null | undefined) {
+  if (!value) return "Unspecified";
+  return value
+    .split("_")
+    .map((segment) => segment.charAt(0).toUpperCase() + segment.slice(1))
+    .join(" ");
+}
+
+function truncateText(value: string, maxLength: number) {
+  if (value.length <= maxLength) return value;
+  return `${value.slice(0, Math.max(0, maxLength - 1)).trimEnd()}...`;
+}
+
+function buildTrainingAnalyticsCsv(data: {
+  summary: {
+    totalTrainings: number;
+    approvedTrainings: number;
+    mandatoryTrainings: number;
+    optionalTrainings: number;
+    participantRecords: number;
+    uniqueParticipants: number;
+    totalCreditedHours: number;
+    averageParticipantsPerTraining: number;
+    averageHoursPerTraining: number;
+    approvalRate: number;
+    mandatoryShare: number;
+    dominantDeliveryMode: string | null;
+  };
+  deliveryModes: Array<{
+    deliveryMode: string;
+    label: string;
+    count: number;
+    sharePercent: number;
+  }>;
+  topTrainings: Array<{
+    trainingEventId: string;
+    title: string;
+    shortTitle: string;
+    deliveryMode: string;
+    deliveryModeLabel: string;
+    category: string | null;
+    startDate: string;
+    ownerUnitName: string;
+    participants: number;
+    totalHoursCredited: number;
+    plannedHours: number;
+  }>;
+  ownerUnits: Array<{
+    unitId: string;
+    unitName: string;
+    trainingCount: number;
+    participants: number;
+    totalHoursCredited: number;
+  }>;
+  insights: string[];
+}) {
+  return toSectionedCsv([
+    {
+      title: "Summary",
+      rows: [
+        { metric: "Total Trainings", value: data.summary.totalTrainings },
+        { metric: "Approved Trainings", value: data.summary.approvedTrainings },
+        { metric: "Mandatory Trainings", value: data.summary.mandatoryTrainings },
+        { metric: "Optional Trainings", value: data.summary.optionalTrainings },
+        { metric: "Participant Records", value: data.summary.participantRecords },
+        { metric: "Unique Participants", value: data.summary.uniqueParticipants },
+        { metric: "Total Credited Hours", value: data.summary.totalCreditedHours },
+        {
+          metric: "Average Participants Per Training",
+          value: data.summary.averageParticipantsPerTraining,
+        },
+        { metric: "Average Hours Per Training", value: data.summary.averageHoursPerTraining },
+        { metric: "Approval Rate Percent", value: data.summary.approvalRate },
+        { metric: "Mandatory Share Percent", value: data.summary.mandatoryShare },
+        {
+          metric: "Dominant Delivery Mode",
+          value: data.summary.dominantDeliveryMode || "None",
+        },
+      ],
+    },
+    {
+      title: "Delivery Modes",
+      rows: data.deliveryModes.map((row) => ({
+        deliveryMode: row.deliveryMode,
+        label: row.label,
+        trainings: row.count,
+        sharePercent: row.sharePercent,
+      })),
+    },
+    {
+      title: "Highest Participation Trainings",
+      rows: data.topTrainings.map((row) => ({
+        trainingEventId: row.trainingEventId,
+        title: row.title,
+        deliveryMode: row.deliveryModeLabel,
+        category: row.category || "",
+        ownerUnitName: row.ownerUnitName,
+        participants: row.participants,
+        totalHoursCredited: row.totalHoursCredited,
+        plannedHours: row.plannedHours,
+        startDate: row.startDate,
+      })),
+    },
+    {
+      title: "Training Hours by Owning Unit",
+      rows: data.ownerUnits.map((row) => ({
+        unitId: row.unitId,
+        unitName: row.unitName,
+        trainingCount: row.trainingCount,
+        participants: row.participants,
+        totalHoursCredited: row.totalHoursCredited,
+      })),
+    },
+    {
+      title: "Training Insights",
+      rows: data.insights.map((insight, index) => ({
+        order: index + 1,
+        insight,
+      })),
+    },
+  ]);
+}
+
 function paginateReportRows<T>(rows: T[], page: number) {
   const total = rows.length;
   const totalPages = total === 0 ? 1 : Math.ceil(total / REPORT_PAGE_SIZE);
@@ -3520,6 +3665,337 @@ export async function registerRoutes(
     }
 
     res.json(paginateReportRows(rows, requestedPage));
+  });
+
+  api.get("/reports/training-analytics", async (req, res) => {
+    const parsed = reportQuerySchema.safeParse(req.query);
+    if (!parsed.success) {
+      return res.status(400).json({ message: parsed.error.flatten() });
+    }
+
+    const scopeUnitIds = await getScopedUnitIds(req.user!);
+    if (scopeUnitIds.length === 0) {
+      const emptyAnalytics = {
+        summary: {
+          totalTrainings: 0,
+          approvedTrainings: 0,
+          mandatoryTrainings: 0,
+          optionalTrainings: 0,
+          participantRecords: 0,
+          uniqueParticipants: 0,
+          totalCreditedHours: 0,
+          averageParticipantsPerTraining: 0,
+          averageHoursPerTraining: 0,
+          approvalRate: 0,
+          mandatoryShare: 0,
+          dominantDeliveryMode: null,
+        },
+        deliveryModes: [],
+        topTrainings: [],
+        ownerUnits: [],
+        insights: ["No scoped training data is available for the selected filters."],
+      };
+      if (parsed.data.format === "csv") {
+        const csv = buildTrainingAnalyticsCsv(emptyAnalytics);
+        res.setHeader("Content-Type", "text/csv");
+        res.setHeader("Content-Disposition", "attachment; filename=\"training-analytics.csv\"");
+        return res.send(csv);
+      }
+      return res.json(emptyAnalytics);
+    }
+
+    let allowedUnits = scopeUnitIds;
+    if (parsed.data.unitId) {
+      if (!scopeUnitIds.includes(parsed.data.unitId)) {
+        return res.status(403).json({ message: "Unit out of scope." });
+      }
+      const includeDescendants = parsed.data.includeChildren !== "false";
+      allowedUnits =
+        includeDescendants
+          ? await getDescendantUnits(parsed.data.unitId, scopeUnitIds)
+          : [parsed.data.unitId];
+    }
+
+    const trainingFilters = [
+      inArray(trainingEvents.ownerUnitId, allowedUnits),
+      trainingEventNotDeletedCondition(),
+    ];
+    if (parsed.data.from) {
+      trainingFilters.push(gte(trainingEvents.startDate, parsed.data.from));
+    }
+    if (parsed.data.to) {
+      trainingFilters.push(lte(trainingEvents.endDate, parsed.data.to));
+    }
+
+    const scopedTrainingRows = await db
+      .select({
+        id: trainingEvents.id,
+        title: trainingEvents.title,
+        category: trainingEvents.category,
+        deliveryMode: trainingEvents.deliveryMode,
+        ownerUnitId: trainingEvents.ownerUnitId,
+        startDate: trainingEvents.startDate,
+        endDate: trainingEvents.endDate,
+        hours: trainingEvents.hours,
+        isMandatory: trainingEvents.isMandatory,
+        workflowStatus: trainingEvents.workflowStatus,
+      })
+      .from(trainingEvents)
+      .where(and(...trainingFilters))
+      .orderBy(asc(trainingEvents.startDate), asc(trainingEvents.title));
+
+    if (scopedTrainingRows.length === 0) {
+      const emptyAnalytics = {
+        summary: {
+          totalTrainings: 0,
+          approvedTrainings: 0,
+          mandatoryTrainings: 0,
+          optionalTrainings: 0,
+          participantRecords: 0,
+          uniqueParticipants: 0,
+          totalCreditedHours: 0,
+          averageParticipantsPerTraining: 0,
+          averageHoursPerTraining: 0,
+          approvalRate: 0,
+          mandatoryShare: 0,
+          dominantDeliveryMode: null,
+        },
+        deliveryModes: [],
+        topTrainings: [],
+        ownerUnits: [],
+        insights: ["No training events match the selected filters."],
+      };
+      if (parsed.data.format === "csv") {
+        const csv = buildTrainingAnalyticsCsv(emptyAnalytics);
+        res.setHeader("Content-Type", "text/csv");
+        res.setHeader("Content-Disposition", "attachment; filename=\"training-analytics.csv\"");
+        return res.send(csv);
+      }
+      return res.json(emptyAnalytics);
+    }
+
+    const trainingIds = scopedTrainingRows.map((row) => row.id);
+    const ownerUnitIds = Array.from(new Set(scopedTrainingRows.map((row) => row.ownerUnitId)));
+    const ownerUnitRows = await db
+      .select({ id: units.id, name: units.name })
+      .from(units)
+      .where(inArray(units.id, ownerUnitIds));
+    const ownerUnitNameById = new Map(ownerUnitRows.map((row) => [row.id, row.name]));
+
+    const attendanceFilters = [
+      inArray(attendanceRecords.trainingEventId, trainingIds),
+      inArray(attendanceRecords.workflowStatus, ["approved", "locked"]),
+      attendanceNotDeletedCondition(),
+      employeeNotDeletedCondition(),
+    ];
+    if (parsed.data.from) {
+      attendanceFilters.push(gte(attendanceRecords.attendanceDate, parsed.data.from));
+    }
+    if (parsed.data.to) {
+      attendanceFilters.push(lte(attendanceRecords.attendanceDate, parsed.data.to));
+    }
+
+    const scopedAttendanceRows = await db
+      .select({
+        trainingEventId: attendanceRecords.trainingEventId,
+        employeeId: attendanceRecords.employeeId,
+        hoursCredited: attendanceRecords.hoursCredited,
+      })
+      .from(attendanceRecords)
+      .innerJoin(employees, eq(attendanceRecords.employeeId, employees.id))
+      .where(and(...attendanceFilters));
+
+    const participantSetsByTraining = new Map<string, Set<string>>();
+    const participantSetsByOwnerUnit = new Map<string, Set<string>>();
+    const creditedHoursByTraining = new Map<string, number>();
+    const trainingById = new Map(scopedTrainingRows.map((row) => [row.id, row]));
+
+    for (const row of scopedAttendanceRows) {
+      const training = trainingById.get(row.trainingEventId);
+      if (!training) continue;
+
+      const participantSet = participantSetsByTraining.get(row.trainingEventId) || new Set<string>();
+      participantSet.add(row.employeeId);
+      participantSetsByTraining.set(row.trainingEventId, participantSet);
+
+      const ownerUnitParticipantSet =
+        participantSetsByOwnerUnit.get(training.ownerUnitId) || new Set<string>();
+      ownerUnitParticipantSet.add(row.employeeId);
+      participantSetsByOwnerUnit.set(training.ownerUnitId, ownerUnitParticipantSet);
+
+      creditedHoursByTraining.set(
+        row.trainingEventId,
+        roundTo(
+          (creditedHoursByTraining.get(row.trainingEventId) || 0) + toNumberValue(row.hoursCredited),
+          2,
+        ),
+      );
+    }
+
+    const totalTrainings = scopedTrainingRows.length;
+    const approvedTrainings = scopedTrainingRows.filter((row) =>
+      ["approved", "locked"].includes(row.workflowStatus),
+    ).length;
+    const mandatoryTrainings = scopedTrainingRows.filter((row) => row.isMandatory).length;
+    const optionalTrainings = totalTrainings - mandatoryTrainings;
+    const participantRecords = scopedAttendanceRows.length;
+    const uniqueParticipants = new Set(scopedAttendanceRows.map((row) => row.employeeId)).size;
+    const totalCreditedHours = roundTo(
+      scopedAttendanceRows.reduce((total, row) => total + toNumberValue(row.hoursCredited), 0),
+      2,
+    );
+    const totalPlannedHours = roundTo(
+      scopedTrainingRows.reduce((total, row) => total + toNumberValue(row.hours), 0),
+      2,
+    );
+    const approvalRate = totalTrainings === 0 ? 0 : roundTo((approvedTrainings / totalTrainings) * 100, 1);
+    const mandatoryShare =
+      totalTrainings === 0 ? 0 : roundTo((mandatoryTrainings / totalTrainings) * 100, 1);
+
+    const deliveryModeBuckets = new Map<string, number>();
+    for (const row of scopedTrainingRows) {
+      const current = deliveryModeBuckets.get(row.deliveryMode) || 0;
+      deliveryModeBuckets.set(row.deliveryMode, current + 1);
+    }
+    const deliveryModes = Array.from(deliveryModeBuckets.entries())
+      .map(([deliveryMode, count]) => ({
+        deliveryMode,
+        label: formatDeliveryModeLabel(deliveryMode),
+        count,
+        sharePercent: totalTrainings === 0 ? 0 : roundTo((count / totalTrainings) * 100, 1),
+      }))
+      .sort((a, b) => b.count - a.count || a.label.localeCompare(b.label));
+    const dominantDeliveryMode = deliveryModes[0]?.label ?? null;
+
+    const topTrainings = scopedTrainingRows
+      .map((row) => {
+        const participants = participantSetsByTraining.get(row.id)?.size || 0;
+        const totalHoursCredited = creditedHoursByTraining.get(row.id) || 0;
+        return {
+          trainingEventId: row.id,
+          title: row.title,
+          shortTitle: truncateText(row.title, 34),
+          deliveryMode: row.deliveryMode,
+          deliveryModeLabel: formatDeliveryModeLabel(row.deliveryMode),
+          category: row.category,
+          startDate: row.startDate,
+          ownerUnitName: ownerUnitNameById.get(row.ownerUnitId) || "Unknown Unit",
+          participants,
+          totalHoursCredited,
+          plannedHours: roundTo(toNumberValue(row.hours), 2),
+        };
+      })
+      .sort((a, b) => {
+        if (b.participants !== a.participants) return b.participants - a.participants;
+        if (b.totalHoursCredited !== a.totalHoursCredited) {
+          return b.totalHoursCredited - a.totalHoursCredited;
+        }
+        return a.title.localeCompare(b.title);
+      })
+      .slice(0, 5);
+
+    const ownerUnitStats = new Map<
+      string,
+      { unitId: string; unitName: string; trainingCount: number; totalHoursCredited: number }
+    >();
+    for (const row of scopedTrainingRows) {
+      const existing = ownerUnitStats.get(row.ownerUnitId) || {
+        unitId: row.ownerUnitId,
+        unitName: ownerUnitNameById.get(row.ownerUnitId) || "Unknown Unit",
+        trainingCount: 0,
+        totalHoursCredited: 0,
+      };
+      existing.trainingCount += 1;
+      existing.totalHoursCredited = roundTo(
+        existing.totalHoursCredited + (creditedHoursByTraining.get(row.id) || 0),
+        2,
+      );
+      ownerUnitStats.set(row.ownerUnitId, existing);
+    }
+
+    const ownerUnits = Array.from(ownerUnitStats.values())
+      .map((row) => ({
+        ...row,
+        participants: participantSetsByOwnerUnit.get(row.unitId)?.size || 0,
+      }))
+      .sort((a, b) => {
+        if (b.totalHoursCredited !== a.totalHoursCredited) {
+          return b.totalHoursCredited - a.totalHoursCredited;
+        }
+        if (b.trainingCount !== a.trainingCount) {
+          return b.trainingCount - a.trainingCount;
+        }
+        return a.unitName.localeCompare(b.unitName);
+      })
+      .slice(0, 6);
+
+    const averageParticipantsPerTraining = totalTrainings === 0
+      ? 0
+      : roundTo(
+          scopedTrainingRows.reduce(
+            (total, row) => total + (participantSetsByTraining.get(row.id)?.size || 0),
+            0,
+          ) / totalTrainings,
+          1,
+        );
+    const averageHoursPerTraining =
+      totalTrainings === 0 ? 0 : roundTo(totalPlannedHours / totalTrainings, 1);
+
+    const insights: string[] = [];
+    if (deliveryModes.length > 0) {
+      insights.push(
+        `${deliveryModes[0].label} delivery accounts for ${deliveryModes[0].sharePercent}% of scoped trainings.`,
+      );
+    }
+    if (mandatoryShare > 0) {
+      insights.push(
+        `${mandatoryShare}% of trainings are mandatory, so the portfolio is weighted toward compliance-oriented delivery.`,
+      );
+    }
+    if (topTrainings[0]) {
+      insights.push(
+        `${truncateText(topTrainings[0].title, 64)} has the widest reach with ${topTrainings[0].participants} participants and ${topTrainings[0].totalHoursCredited} credited hours.`,
+      );
+    }
+    if (ownerUnits[0] && totalTrainings > 0) {
+      const leadUnitShare = roundTo((ownerUnits[0].trainingCount / totalTrainings) * 100, 1);
+      insights.push(
+        `${ownerUnits[0].unitName} currently owns ${leadUnitShare}% of scoped trainings, so training supply is concentrated there.`,
+      );
+    }
+    if (approvedTrainings === totalTrainings && totalTrainings > 0) {
+      insights.push("All scoped trainings are already approved or locked.");
+    }
+
+    const analyticsPayload = {
+      summary: {
+        totalTrainings,
+        approvedTrainings,
+        mandatoryTrainings,
+        optionalTrainings,
+        participantRecords,
+        uniqueParticipants,
+        totalCreditedHours,
+        averageParticipantsPerTraining,
+        averageHoursPerTraining,
+        approvalRate,
+        mandatoryShare,
+        dominantDeliveryMode,
+      },
+      deliveryModes,
+      topTrainings,
+      ownerUnits,
+      insights,
+    };
+
+    if (parsed.data.format === "csv") {
+      const csv = buildTrainingAnalyticsCsv(analyticsPayload);
+      res.setHeader("Content-Type", "text/csv");
+      res.setHeader("Content-Disposition", "attachment; filename=\"training-analytics.csv\"");
+      return res.send(csv);
+    }
+
+    res.json(analyticsPayload);
   });
 
   api.get("/reports/compliance", async (req, res) => {
