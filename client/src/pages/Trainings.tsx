@@ -9,7 +9,7 @@ import {
   CardTitle,
   CardDescription,
 } from "@/components/ui/card";
-import { Calendar as CalendarIcon, Users, Clock, MoreVertical, Plus, Copy } from "lucide-react";
+import { Calendar as CalendarIcon, Users, Clock, MoreVertical, Plus, Copy, Download } from "lucide-react";
 import { useUser } from "@/hooks/use-user";
 import { useQuery } from "@tanstack/react-query";
 import { apiRequest, getQueryFn, queryClient } from "@/lib/queryClient";
@@ -100,10 +100,44 @@ const workflowBadgeClassByStatus: Record<string, string> = {
   locked: "bg-indigo-50 text-indigo-700 border-indigo-200",
 };
 
+function escapeCsvValue(value: unknown) {
+  if (value === null || value === undefined) return "";
+  const stringValue = String(value);
+  if (/[",\n]/.test(stringValue)) {
+    return `"${stringValue.replace(/"/g, '""')}"`;
+  }
+  return stringValue;
+}
+
+function rowsToCsv(rows: Array<Record<string, unknown>>) {
+  if (rows.length === 0) {
+    return "message\nNo training events available";
+  }
+  const headers = Object.keys(rows[0]);
+  const lines = [
+    headers.join(","),
+    ...rows.map((row) => headers.map((header) => escapeCsvValue(row[header])).join(",")),
+  ];
+  return lines.join("\n");
+}
+
+function downloadCsvFile(fileName: string, content: string) {
+  const blob = new Blob([content], { type: "text/csv;charset=utf-8;" });
+  const url = window.URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = fileName;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  window.URL.revokeObjectURL(url);
+}
+
 export default function Trainings() {
   const { user } = useUser();
   const { toast } = useToast();
-  const [filter, setFilter] = useState("All");
+  const [statusFilter, setStatusFilter] = useState("All");
+  const [categoryFilter, setCategoryFilter] = useState("All Types");
   const [isDialogOpen, setIsDialogOpen] = useState(false);
   const [editingEventId, setEditingEventId] = useState<string | null>(null);
   const [detailsEvent, setDetailsEvent] = useState<any | null>(null);
@@ -155,16 +189,56 @@ export default function Trainings() {
     return [form.provider, ...internalProviderOptions];
   }, [internalProviderOptions, form.provider]);
   const filtered = useMemo(() => {
-    if (filter === "All") return events;
     return events.filter((event: any) => {
-      if (filter === "Drafts") return event.workflowStatus === "draft";
-      if (filter === "Submitted") return event.workflowStatus === "submitted";
-      if (filter === "Approved") return event.workflowStatus === "approved";
-      if (filter === "Locked") return event.workflowStatus === "locked";
-      return true;
+      const matchesStatus =
+        statusFilter === "All"
+          ? true
+          : statusFilter === "Drafts"
+            ? event.workflowStatus === "draft"
+            : statusFilter === "Submitted"
+              ? event.workflowStatus === "submitted"
+              : statusFilter === "Approved"
+                ? event.workflowStatus === "approved"
+                : statusFilter === "Locked"
+                  ? event.workflowStatus === "locked"
+                  : true;
+
+      const normalizedCategory = normalizeCategory(event.category);
+      const matchesCategory =
+        categoryFilter === "All Types"
+          ? true
+          : categoryFilter === "Internal"
+            ? normalizedCategory === "internal"
+            : normalizedCategory === "external";
+
+      return matchesStatus && matchesCategory;
     });
-  }, [events, filter]);
+  }, [events, statusFilter, categoryFilter]);
   const isPageLoading = trainingsLoading || unitsLoading || employeesLoading;
+
+  const handleExportTrainings = () => {
+    const csvRows = filtered.map((event: any) => ({
+      title: event.title || "",
+      category: formatCategoryLabel(event.category) || "",
+      provider:
+        event.provider || (normalizeCategory(event.category) === "internal" ? "Internal" : ""),
+      venue: event.venue || "",
+      startDate: event.startDate || "",
+      endDate: event.endDate || "",
+      hours: event.hours ?? "",
+      deliveryMode: formatWorkflowLabel(event.deliveryMode),
+      ownerUnit: unitNameById.get(event.ownerUnitId) || "",
+      visibilityScope: formatWorkflowLabel(event.visibilityScope),
+      mandatory: event.isMandatory ? "Yes" : "No",
+      workflowStatus: formatWorkflowLabel(event.workflowStatus),
+      description: event.description || "",
+    }));
+
+    const fileName = `training-events-${statusFilter.toLowerCase().replace(/\s+/g, "-")}-${categoryFilter
+      .toLowerCase()
+      .replace(/\s+/g, "-")}.csv`;
+    downloadCsvFile(fileName, rowsToCsv(csvRows));
+  };
 
   useEffect(() => {
     if (!form.ownerUnitId && units.length > 0) {
@@ -336,191 +410,212 @@ export default function Trainings() {
           <h1 className="text-2xl font-display font-bold">Training Events</h1>
           <p className="text-muted-foreground">Browse and manage upcoming seminars and workshops.</p>
         </div>
-        {canCreate ? (
-          <Dialog
-            open={isDialogOpen}
-            onOpenChange={(open) => {
-              setIsDialogOpen(open);
-              if (!open) {
-                resetForm();
-              }
-            }}
-          >
-            <DialogTrigger asChild>
-              <Button className="shadow-md" onClick={openCreateDialog}>
-                <Plus className="mr-2 h-4 w-4" />
-                Create Training/Workshop
-              </Button>
-            </DialogTrigger>
-            <DialogContent>
-              <DialogHeader>
-                <DialogTitle>
-                  {editingEventId ? "Edit Training/Workshop" : "New Training/Workshop"}
-                </DialogTitle>
-                <DialogDescription className="sr-only">
-                  Create or update a training/workshop event.
-                </DialogDescription>
-              </DialogHeader>
-              <div className="space-y-3">
-                <div className="space-y-1.5">
-                  <label className="text-sm font-medium">Title</label>
-                  <Input
-                    value={form.title}
-                    onChange={(event) => setForm((prev) => ({ ...prev, title: event.target.value }))}
-                  />
-                </div>
-                <div className="space-y-1.5">
-                  <label className="text-sm font-medium">Category</label>
-                  <Select
-                    value={form.category}
-                    onValueChange={(value) =>
-                      setForm((prev) => ({ ...prev, category: value, provider: "" }))
-                    }
-                  >
-                    <SelectTrigger>
-                      <SelectValue placeholder="Category" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="internal">Internal</SelectItem>
-                      <SelectItem value="external">External</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
-                {form.category === "external" ? (
+        <div className="flex flex-wrap items-center gap-3">
+          <Button variant="outline" onClick={handleExportTrainings} disabled={filtered.length === 0}>
+            <Download className="mr-2 h-4 w-4" />
+            Export CSV
+          </Button>
+          {canCreate ? (
+            <Dialog
+              open={isDialogOpen}
+              onOpenChange={(open) => {
+                setIsDialogOpen(open);
+                if (!open) {
+                  resetForm();
+                }
+              }}
+            >
+              <DialogTrigger asChild>
+                <Button className="shadow-md" onClick={openCreateDialog}>
+                  <Plus className="mr-2 h-4 w-4" />
+                  Create Training/Workshop
+                </Button>
+              </DialogTrigger>
+              <DialogContent>
+                <DialogHeader>
+                  <DialogTitle>
+                    {editingEventId ? "Edit Training/Workshop" : "New Training/Workshop"}
+                  </DialogTitle>
+                  <DialogDescription className="sr-only">
+                    Create or update a training/workshop event.
+                  </DialogDescription>
+                </DialogHeader>
+                <div className="space-y-3">
                   <div className="space-y-1.5">
-                    <label className="text-sm font-medium">External Provider</label>
+                    <label className="text-sm font-medium">Title</label>
                     <Input
-                      value={form.provider}
-                      onChange={(event) =>
-                        setForm((prev) => ({ ...prev, provider: event.target.value }))
-                      }
+                      value={form.title}
+                      onChange={(event) => setForm((prev) => ({ ...prev, title: event.target.value }))}
                     />
                   </div>
-                ) : (
                   <div className="space-y-1.5">
-                    <label className="text-sm font-medium">Provider (Department/College)</label>
+                    <label className="text-sm font-medium">Category</label>
                     <Select
-                      value={form.provider}
-                      onValueChange={(value) => setForm((prev) => ({ ...prev, provider: value }))}
+                      value={form.category}
+                      onValueChange={(value) =>
+                        setForm((prev) => ({ ...prev, category: value, provider: "" }))
+                      }
                     >
                       <SelectTrigger>
-                        <SelectValue placeholder="Provider (Department/College)" />
+                        <SelectValue placeholder="Category" />
                       </SelectTrigger>
                       <SelectContent>
-                        {providerOptions.length > 0 ? (
-                          providerOptions.map((providerName) => (
-                            <SelectItem key={providerName} value={providerName}>
-                              {providerName}
-                            </SelectItem>
-                          ))
-                        ) : (
-                          <SelectItem value="__no_provider_options__" disabled>
-                            No department/college options available
-                          </SelectItem>
-                        )}
+                        <SelectItem value="internal">Internal</SelectItem>
+                        <SelectItem value="external">External</SelectItem>
                       </SelectContent>
                     </Select>
                   </div>
-                )}
-                <div className="space-y-1.5">
-                  <label className="text-sm font-medium">Venue</label>
-                  <Input
-                    value={form.venue}
-                    onChange={(event) => setForm((prev) => ({ ...prev, venue: event.target.value }))}
-                  />
-                </div>
-                <div className="grid grid-cols-2 gap-2">
-                  <div className="space-y-1.5">
-                    <label className="text-sm font-medium">Start Date</label>
-                    <Input
-                      type="date"
-                      value={form.startDate}
-                      onChange={(event) =>
-                        setForm((prev) => ({ ...prev, startDate: event.target.value }))
-                      }
-                    />
-                  </div>
-                  <div className="space-y-1.5">
-                    <label className="text-sm font-medium">End Date</label>
-                    <Input
-                      type="date"
-                      value={form.endDate}
-                      onChange={(event) => setForm((prev) => ({ ...prev, endDate: event.target.value }))}
-                    />
-                  </div>
-                </div>
-                <div className="space-y-2">
-                  <label className="text-sm font-medium text-foreground">Hours Credit</label>
-                  <Input
-                    type="number"
-                    value={form.hours}
-                    onChange={(event) => setForm((prev) => ({ ...prev, hours: event.target.value }))}
-                  />
-                </div>
-                <div className="space-y-1.5">
-                  <label className="text-sm font-medium">Delivery Mode</label>
-                  <Select
-                    value={form.deliveryMode}
-                    onValueChange={(value) => setForm((prev) => ({ ...prev, deliveryMode: value }))}
-                  >
-                    <SelectTrigger>
-                      <SelectValue placeholder="Delivery Mode" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="in_person">In Person</SelectItem>
-                      <SelectItem value="virtual">Virtual</SelectItem>
-                      <SelectItem value="hybrid">Hybrid</SelectItem>
-                      <SelectItem value="self_paced">Self Paced</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
-                <div className="space-y-1.5">
-                  <label className="text-sm font-medium">Attendance Requirement</label>
-                  <Select
-                    value={form.isMandatory ? "yes" : "no"}
-                    onValueChange={(value) =>
-                      setForm((prev) => ({ ...prev, isMandatory: value === "yes" }))
-                    }
-                  >
-                    <SelectTrigger>
-                      <SelectValue placeholder="Mandatory" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="yes">Mandatory</SelectItem>
-                      <SelectItem value="no">Optional</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
-                <Button onClick={handleCreateOrUpdate} disabled={isSavingEvent}>
-                  {isSavingEvent ? (
-                    <>
-                      <Spinner className="mr-2 h-4 w-4" />
-                      Saving...
-                    </>
-                  ) : editingEventId ? (
-                    "Save Changes"
+                  {form.category === "external" ? (
+                    <div className="space-y-1.5">
+                      <label className="text-sm font-medium">External Provider</label>
+                      <Input
+                        value={form.provider}
+                        onChange={(event) =>
+                          setForm((prev) => ({ ...prev, provider: event.target.value }))
+                        }
+                      />
+                    </div>
                   ) : (
-                    "Create Training/Workshop"
+                    <div className="space-y-1.5">
+                      <label className="text-sm font-medium">Provider (Department/College)</label>
+                      <Select
+                        value={form.provider}
+                        onValueChange={(value) => setForm((prev) => ({ ...prev, provider: value }))}
+                      >
+                        <SelectTrigger>
+                          <SelectValue placeholder="Provider (Department/College)" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {providerOptions.length > 0 ? (
+                            providerOptions.map((providerName) => (
+                              <SelectItem key={providerName} value={providerName}>
+                                {providerName}
+                              </SelectItem>
+                            ))
+                          ) : (
+                            <SelectItem value="__no_provider_options__" disabled>
+                              No department/college options available
+                            </SelectItem>
+                          )}
+                        </SelectContent>
+                      </Select>
+                    </div>
                   )}
-                </Button>
-              </div>
-            </DialogContent>
-          </Dialog>
-        ) : null}
+                  <div className="space-y-1.5">
+                    <label className="text-sm font-medium">Venue</label>
+                    <Input
+                      value={form.venue}
+                      onChange={(event) => setForm((prev) => ({ ...prev, venue: event.target.value }))}
+                    />
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <div className="space-y-1.5">
+                      <label className="text-sm font-medium">Start Date</label>
+                      <Input
+                        type="date"
+                        value={form.startDate}
+                        onChange={(event) =>
+                          setForm((prev) => ({ ...prev, startDate: event.target.value }))
+                        }
+                      />
+                    </div>
+                    <div className="space-y-1.5">
+                      <label className="text-sm font-medium">End Date</label>
+                      <Input
+                        type="date"
+                        value={form.endDate}
+                        onChange={(event) => setForm((prev) => ({ ...prev, endDate: event.target.value }))}
+                      />
+                    </div>
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-sm font-medium text-foreground">Hours Credit</label>
+                    <Input
+                      type="number"
+                      value={form.hours}
+                      onChange={(event) => setForm((prev) => ({ ...prev, hours: event.target.value }))}
+                    />
+                  </div>
+                  <div className="space-y-1.5">
+                    <label className="text-sm font-medium">Delivery Mode</label>
+                    <Select
+                      value={form.deliveryMode}
+                      onValueChange={(value) => setForm((prev) => ({ ...prev, deliveryMode: value }))}
+                    >
+                      <SelectTrigger>
+                        <SelectValue placeholder="Delivery Mode" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="in_person">In Person</SelectItem>
+                        <SelectItem value="virtual">Virtual</SelectItem>
+                        <SelectItem value="hybrid">Hybrid</SelectItem>
+                        <SelectItem value="self_paced">Self Paced</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="space-y-1.5">
+                    <label className="text-sm font-medium">Attendance Requirement</label>
+                    <Select
+                      value={form.isMandatory ? "yes" : "no"}
+                      onValueChange={(value) =>
+                        setForm((prev) => ({ ...prev, isMandatory: value === "yes" }))
+                      }
+                    >
+                      <SelectTrigger>
+                        <SelectValue placeholder="Mandatory" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="yes">Mandatory</SelectItem>
+                        <SelectItem value="no">Optional</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <Button onClick={handleCreateOrUpdate} disabled={isSavingEvent}>
+                    {isSavingEvent ? (
+                      <>
+                        <Spinner className="mr-2 h-4 w-4" />
+                        Saving...
+                      </>
+                    ) : editingEventId ? (
+                      "Save Changes"
+                    ) : (
+                      "Create Training/Workshop"
+                    )}
+                  </Button>
+                </div>
+              </DialogContent>
+            </Dialog>
+          ) : null}
+        </div>
       </div>
 
-      <div className="flex items-center gap-4 overflow-x-auto pb-2">
-        {["All", "Drafts", "Submitted", "Approved", "Locked"].map((value) => (
-          <Button
-            key={value}
-            variant={filter === value ? "default" : "outline"}
-            onClick={() => setFilter(value)}
-            className="rounded-full"
-            size="sm"
-          >
-            {value}
-          </Button>
-        ))}
+      <div className="space-y-3">
+        <div className="flex items-center gap-4 overflow-x-auto pb-2">
+          {["All", "Drafts", "Submitted", "Approved", "Locked"].map((value) => (
+            <Button
+              key={value}
+              variant={statusFilter === value ? "default" : "outline"}
+              onClick={() => setStatusFilter(value)}
+              className="rounded-full"
+              size="sm"
+            >
+              {value}
+            </Button>
+          ))}
+        </div>
+        <div className="flex items-center gap-2 overflow-x-auto pb-2">
+          {["All Types", "Internal", "External"].map((value) => (
+            <Button
+              key={value}
+              variant={categoryFilter === value ? "default" : "outline"}
+              onClick={() => setCategoryFilter(value)}
+              className="rounded-full"
+              size="sm"
+            >
+              {value}
+            </Button>
+          ))}
+        </div>
       </div>
 
       <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-3">

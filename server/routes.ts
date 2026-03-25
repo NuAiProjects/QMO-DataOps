@@ -3575,6 +3575,143 @@ export async function registerRoutes(
     res.json(paginateReportRows(rows, requestedPage));
   });
 
+  api.get("/reports/hours-by-employee/:employeeId/training-data", async (req, res) => {
+    const paramSchema = z.object({
+      employeeId: z.string().uuid(),
+    });
+    const parsedParams = paramSchema.safeParse({
+      employeeId: getRouteParam(req.params.employeeId),
+    });
+    if (!parsedParams.success) {
+      return res.status(400).json({ message: parsedParams.error.flatten() });
+    }
+
+    const parsedQuery = reportQuerySchema.safeParse(req.query);
+    if (!parsedQuery.success) {
+      return res.status(400).json({ message: parsedQuery.error.flatten() });
+    }
+
+    const scopeUnitIds = await getScopedUnitIds(req.user!);
+    if (scopeUnitIds.length === 0) {
+      res.setHeader("Content-Type", "text/csv");
+      res.setHeader(
+        "Content-Disposition",
+        `attachment; filename="employee-training-data-${parsedParams.data.employeeId}.csv"`,
+      );
+      return res.send("message\nNo scoped employee data available.");
+    }
+
+    let allowedUnits = scopeUnitIds;
+    if (parsedQuery.data.unitId) {
+      if (!scopeUnitIds.includes(parsedQuery.data.unitId)) {
+        return res.status(403).json({ message: "Unit out of scope." });
+      }
+      const includeDescendants = parsedQuery.data.includeChildren !== "false";
+      allowedUnits =
+        includeDescendants
+          ? await getDescendantUnits(parsedQuery.data.unitId, scopeUnitIds)
+          : [parsedQuery.data.unitId];
+    }
+
+    const [employeeRow] = await db
+      .select({
+        id: employees.id,
+        employeeNo: employees.employeeNo,
+        fullName: employees.fullName,
+        email: employees.email,
+        unitId: employees.unitId,
+      })
+      .from(employees)
+      .where(
+        and(
+          eq(employees.id, parsedParams.data.employeeId),
+          employeeNotDeletedCondition(),
+        ),
+      )
+      .limit(1);
+
+    if (!employeeRow) {
+      return res.status(404).json({ message: "Employee not found." });
+    }
+
+    if (!allowedUnits.includes(employeeRow.unitId)) {
+      return res.status(403).json({ message: "Employee out of scope." });
+    }
+
+    const detailFilters = [
+      eq(attendanceRecords.employeeId, employeeRow.id),
+      inArray(attendanceRecords.workflowStatus, ["approved", "locked"]),
+      attendanceNotDeletedCondition(),
+      trainingEventNotDeletedCondition(),
+    ];
+    if (parsedQuery.data.from) {
+      detailFilters.push(gte(attendanceRecords.attendanceDate, parsedQuery.data.from));
+    }
+    if (parsedQuery.data.to) {
+      detailFilters.push(lte(attendanceRecords.attendanceDate, parsedQuery.data.to));
+    }
+
+    const rows = await db
+      .select({
+        employeeNo: employees.employeeNo,
+        employeeName: employees.fullName,
+        employeeEmail: employees.email,
+        trainingTitle: trainingEvents.title,
+        trainingCategory: trainingEvents.category,
+        trainingProvider: trainingEvents.provider,
+        deliveryMode: trainingEvents.deliveryMode,
+        ownerUnitName: units.name,
+        attendanceDate: attendanceRecords.attendanceDate,
+        hoursCredited: attendanceRecords.hoursCredited,
+        attendanceStatus: attendanceRecords.attendanceStatus,
+        workflowStatus: attendanceRecords.workflowStatus,
+        visibilityScope: trainingEvents.visibilityScope,
+        isMandatory: trainingEvents.isMandatory,
+      })
+      .from(attendanceRecords)
+      .innerJoin(employees, eq(attendanceRecords.employeeId, employees.id))
+      .innerJoin(trainingEvents, eq(attendanceRecords.trainingEventId, trainingEvents.id))
+      .leftJoin(units, eq(trainingEvents.ownerUnitId, units.id))
+      .where(and(...detailFilters))
+      .orderBy(desc(attendanceRecords.attendanceDate), asc(trainingEvents.title));
+
+    const csvRows: Array<Record<string, unknown>> =
+      rows.length > 0
+        ? rows.map((row) => ({
+            employeeNo: row.employeeNo,
+            employeeName: row.employeeName,
+            employeeEmail: row.employeeEmail ?? "",
+            trainingTitle: row.trainingTitle,
+            trainingCategory: row.trainingCategory ?? "",
+            trainingProvider: row.trainingProvider ?? "",
+            deliveryMode: formatDeliveryModeLabel(row.deliveryMode),
+            ownerUnit: row.ownerUnitName ?? "",
+            attendanceDate: row.attendanceDate,
+            hoursCredited: row.hoursCredited,
+            attendanceStatus: row.attendanceStatus,
+            workflowStatus: row.workflowStatus,
+            visibilityScope: row.visibilityScope,
+            mandatory: row.isMandatory ? "Yes" : "No",
+          }))
+        : [
+            {
+              employeeNo: employeeRow.employeeNo,
+              employeeName: employeeRow.fullName,
+              employeeEmail: employeeRow.email ?? "",
+              message: "No approved or locked training data for the selected filters.",
+            },
+          ];
+
+    const safeEmployeeName = employeeRow.fullName.replace(/[^a-zA-Z0-9._-]+/g, "_");
+    const csv = toCsv(csvRows);
+    res.setHeader("Content-Type", "text/csv");
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="${safeEmployeeName || employeeRow.id}-training-data.csv"`,
+    );
+    return res.send(csv);
+  });
+
   api.get("/reports/hours-by-unit", async (req, res) => {
     const parsed = reportQuerySchema.safeParse(req.query);
     if (!parsed.success) {
@@ -3665,6 +3802,153 @@ export async function registerRoutes(
     }
 
     res.json(paginateReportRows(rows, requestedPage));
+  });
+
+  api.get("/reports/hours-by-unit/:unitId/training-data", async (req, res) => {
+    const paramSchema = z.object({
+      unitId: z.string().uuid(),
+    });
+    const parsedParams = paramSchema.safeParse({
+      unitId: getRouteParam(req.params.unitId),
+    });
+    if (!parsedParams.success) {
+      return res.status(400).json({ message: parsedParams.error.flatten() });
+    }
+
+    const parsedQuery = reportQuerySchema.safeParse(req.query);
+    if (!parsedQuery.success) {
+      return res.status(400).json({ message: parsedQuery.error.flatten() });
+    }
+
+    const scopeUnitIds = await getScopedUnitIds(req.user!);
+    if (scopeUnitIds.length === 0) {
+      res.setHeader("Content-Type", "text/csv");
+      res.setHeader(
+        "Content-Disposition",
+        `attachment; filename="unit-training-data-${parsedParams.data.unitId}.csv"`,
+      );
+      return res.send("message\nNo scoped unit data available.");
+    }
+
+    let allowedUnits = scopeUnitIds;
+    if (parsedQuery.data.unitId) {
+      if (!scopeUnitIds.includes(parsedQuery.data.unitId)) {
+        return res.status(403).json({ message: "Unit out of scope." });
+      }
+      const includeDescendants = parsedQuery.data.includeChildren !== "false";
+      allowedUnits =
+        includeDescendants
+          ? await getDescendantUnits(parsedQuery.data.unitId, scopeUnitIds)
+          : [parsedQuery.data.unitId];
+    }
+
+    const [unitRow] = await db
+      .select({
+        id: units.id,
+        name: units.name,
+      })
+      .from(units)
+      .where(eq(units.id, parsedParams.data.unitId))
+      .limit(1);
+
+    if (!unitRow) {
+      return res.status(404).json({ message: "Unit not found." });
+    }
+
+    if (!allowedUnits.includes(unitRow.id)) {
+      return res.status(403).json({ message: "Unit out of scope." });
+    }
+
+    const scopedUnitIdsForExport = await getDescendantUnits(unitRow.id, allowedUnits);
+
+    const detailFilters = [
+      inArray(employees.unitId, scopedUnitIdsForExport),
+      employeeNotDeletedCondition(),
+      inArray(attendanceRecords.workflowStatus, ["approved", "locked"]),
+      attendanceNotDeletedCondition(),
+      trainingEventNotDeletedCondition(),
+    ];
+    if (parsedQuery.data.from) {
+      detailFilters.push(gte(attendanceRecords.attendanceDate, parsedQuery.data.from));
+    }
+    if (parsedQuery.data.to) {
+      detailFilters.push(lte(attendanceRecords.attendanceDate, parsedQuery.data.to));
+    }
+
+    const rows = await db
+      .select({
+        unitName: sql<string>`${unitRow.name}`,
+        employeeUnitId: employees.unitId,
+        employeeNo: employees.employeeNo,
+        employeeName: employees.fullName,
+        employeeEmail: employees.email,
+        trainingTitle: trainingEvents.title,
+        trainingCategory: trainingEvents.category,
+        trainingProvider: trainingEvents.provider,
+        deliveryMode: trainingEvents.deliveryMode,
+        trainingOwnerUnitId: trainingEvents.ownerUnitId,
+        attendanceDate: attendanceRecords.attendanceDate,
+        hoursCredited: attendanceRecords.hoursCredited,
+        attendanceStatus: attendanceRecords.attendanceStatus,
+        workflowStatus: attendanceRecords.workflowStatus,
+        visibilityScope: trainingEvents.visibilityScope,
+        mandatory: trainingEvents.isMandatory,
+      })
+      .from(attendanceRecords)
+      .innerJoin(employees, eq(attendanceRecords.employeeId, employees.id))
+      .innerJoin(trainingEvents, eq(attendanceRecords.trainingEventId, trainingEvents.id))
+      .where(and(...detailFilters))
+      .orderBy(asc(employees.fullName), desc(attendanceRecords.attendanceDate), asc(trainingEvents.title));
+
+    const referencedUnitIds = Array.from(
+      new Set(
+        rows.flatMap((row) => [row.employeeUnitId, row.trainingOwnerUnitId]).filter(Boolean),
+      ),
+    );
+    const referencedUnits =
+      referencedUnitIds.length > 0
+        ? await db
+            .select({ id: units.id, name: units.name })
+            .from(units)
+            .where(inArray(units.id, referencedUnitIds))
+        : [];
+    const unitNameById = new Map(referencedUnits.map((row) => [row.id, row.name]));
+
+    const csvRows: Array<Record<string, unknown>> =
+      rows.length > 0
+        ? rows.map((row) => ({
+            unitName: row.unitName,
+            employeeUnitName: unitNameById.get(row.employeeUnitId) ?? "",
+            employeeNo: row.employeeNo,
+            employeeName: row.employeeName,
+            employeeEmail: row.employeeEmail ?? "",
+            trainingTitle: row.trainingTitle,
+            trainingCategory: row.trainingCategory ?? "",
+            trainingProvider: row.trainingProvider ?? "",
+            deliveryMode: formatDeliveryModeLabel(row.deliveryMode),
+            trainingOwnerUnit: unitNameById.get(row.trainingOwnerUnitId) ?? "",
+            attendanceDate: row.attendanceDate,
+            hoursCredited: row.hoursCredited,
+            attendanceStatus: row.attendanceStatus,
+            workflowStatus: row.workflowStatus,
+            visibilityScope: row.visibilityScope,
+            mandatory: row.mandatory ? "Yes" : "No",
+          }))
+        : [
+            {
+              unitName: unitRow.name,
+              message: "No approved or locked training data for the selected filters.",
+            },
+          ];
+
+    const safeUnitName = unitRow.name.replace(/[^a-zA-Z0-9._-]+/g, "_");
+    const csv = toCsv(csvRows);
+    res.setHeader("Content-Type", "text/csv");
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="${safeUnitName || unitRow.id}-training-data.csv"`,
+    );
+    return res.send(csv);
   });
 
   api.get("/reports/training-analytics", async (req, res) => {

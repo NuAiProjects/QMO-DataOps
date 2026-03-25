@@ -1,0 +1,23 @@
+
+> rest-express@1.0.0 dev
+> cross-env NODE_ENV=development tsx server/index.ts
+
+5:15:49 PM [express] serving on port 5000
+5:17:04 PM [express] GET /api/auth/me 200 in 1807ms 696b
+5:17:15 PM [express] GET /api/auth/me 200 in 751ms 696b
+5:17:15 PM [express] GET /api/units 200 in 766ms 12603b
+5:17:16 PM [express] GET /api/reports/hours-by-unit 200 in 877ms 3037b
+5:17:16 PM [express] GET /api/reports/hours-by-employee 200 in 902ms 4162b
+5:17:16 PM [express] GET /api/dashboard/activities 200 in 1067ms 2384b
+5:17:16 PM [express] GET /api/reports/training-analytics 200 in 1164ms 3297b
+5:17:17 PM [express] GET /api/approvals 200 in 2442ms 178280b
+5:17:23 PM [express] GET /api/reports/hours-by-unit/9ffdc038-588e-4810-803d-9831b3247b73/training-data 200 in 1649ms 38159b
+5:18:06 PM [express] GET /api/reports/hours-by-unit/969cd55c-3f9c-4b75-81ff-1e73b5fb630c/training-data 200 in 2499ms 2837b
+5:19:16 PM [express] GET /api/auth/me 200 in 1676ms 696b
+5:19:16 PM [express] GET /api/reports/hours-by-employee 304 in 1744ms
+5:19:16 PM [express] GET /api/dashboard/activities 304 in 1910ms
+5:19:16 PM [express] GET /api/units 304 in 2006ms
+5:19:16 PM [express] GET /api/reports/training-analytics 304 in 2047ms
+5:19:16 PM [express] GET /api/reports/hours-by-unit 304 in 908ms
+5:19:18 PM [express] GET /api/approvals 304 in 4042ms
+[2m5:21:37 PM[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/pages/Reports.tsx, /src/index.css[22m

@@ -117,6 +117,16 @@ type TrainingAnalyticsResponse = {
   insights: string[];
 };
 
+type TrainingsProvidedByUnitRow = {
+  unitId: string;
+  unitName: string;
+  trainingsProvided: number;
+  participants: number;
+  totalHoursCredited: number;
+  averageParticipantsPerTraining: number;
+  trainingSharePercent: number;
+};
+
 const buildQuery = (filters: ReportFilters) => {
   const params = new URLSearchParams();
   if (filters.from) params.set("from", filters.from);
@@ -198,6 +208,11 @@ function formatDecimal(value: number, digits = 1) {
   }).format(value);
 }
 
+function roundToForReport(value: number, digits = 2) {
+  const factor = 10 ** digits;
+  return Math.round(value * factor) / factor;
+}
+
 function truncateLabel(value: string, maxLength: number) {
   if (value.length <= maxLength) return value;
   return `${value.slice(0, Math.max(0, maxLength - 1)).trimEnd()}...`;
@@ -238,6 +253,14 @@ function downloadCsvFile(fileName: string, content: string) {
   link.click();
   document.body.removeChild(link);
   window.URL.revokeObjectURL(url);
+}
+
+function downloadFromUrl(url: string) {
+  const link = document.createElement("a");
+  link.href = url;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
 }
 
 function buildTrainingAnalyticsExportCsv(data: TrainingAnalyticsResponse) {
@@ -368,6 +391,22 @@ export default function Reports() {
   const deliveryModeData = analytics?.deliveryModes ?? [];
   const topTrainingData = analytics?.topTrainings ?? [];
   const ownerUnitData = analytics?.ownerUnits ?? [];
+  const trainingsProvidedByUnitRows = useMemo<TrainingsProvidedByUnitRow[]>(() => {
+    if (!analytics) return [];
+    return ownerUnitData.map((row) => ({
+      unitId: row.unitId,
+      unitName: row.unitName,
+      trainingsProvided: row.trainingCount,
+      participants: row.participants,
+      totalHoursCredited: row.totalHoursCredited,
+      averageParticipantsPerTraining:
+        row.trainingCount === 0 ? 0 : roundToForReport(row.participants / row.trainingCount, 1),
+      trainingSharePercent:
+        analytics.summary.totalTrainings === 0
+          ? 0
+          : roundToForReport((row.trainingCount / analytics.summary.totalTrainings) * 100, 1),
+    }));
+  }, [analytics, ownerUnitData]);
   const selectedUnitName = units.find((unit: any) => unit.id === filters.unitId)?.name;
   const scopeLabel = selectedUnitName || "all scoped units";
 
@@ -411,6 +450,37 @@ export default function Reports() {
   const handleExport = (endpoint: string) => {
     const exportQuery = `${baseQuery}${baseQuery ? "&" : ""}format=csv`;
     window.open(`${endpoint}?${exportQuery}`, "_blank");
+  };
+
+  const handleEmployeeTrainingExport = (employeeId: string) => {
+    const exportQuery = baseQuery;
+    const url = exportQuery
+      ? `/api/reports/hours-by-employee/${employeeId}/training-data?${exportQuery}`
+      : `/api/reports/hours-by-employee/${employeeId}/training-data`;
+    downloadFromUrl(url);
+  };
+
+  const handleUnitTrainingExport = (unitId: string) => {
+    const exportQuery = baseQuery;
+    const url = exportQuery
+      ? `/api/reports/hours-by-unit/${unitId}/training-data?${exportQuery}`
+      : `/api/reports/hours-by-unit/${unitId}/training-data`;
+    downloadFromUrl(url);
+  };
+
+  const handleTrainingsProvidedByUnitExport = () => {
+    const csv = rowsToCsv(
+      trainingsProvidedByUnitRows.map((row) => ({
+        unitId: row.unitId,
+        unitName: row.unitName,
+        trainingsProvided: row.trainingsProvided,
+        participants: row.participants,
+        totalHoursCredited: row.totalHoursCredited,
+        averageParticipantsPerTraining: row.averageParticipantsPerTraining,
+        trainingSharePercent: row.trainingSharePercent,
+      })),
+    );
+    downloadCsvFile("trainings-provided-by-unit.csv", csv);
   };
 
   const getPaginationLabel = <T,>(data?: ReportResponse<T>) => {
@@ -718,6 +788,59 @@ export default function Reports() {
             )}
           </CardContent>
         </Card>
+
+        <Card className="border-border/60">
+          <CardHeader className="flex flex-row items-center justify-between gap-3">
+            <div>
+              <CardTitle>Trainings Provided by Unit</CardTitle>
+              <CardDescription>
+                Unit-level report of trainings provided within the current scope.
+              </CardDescription>
+            </div>
+            <Button
+              variant="outline"
+              onClick={handleTrainingsProvidedByUnitExport}
+              disabled={trainingsProvidedByUnitRows.length === 0}
+            >
+              <Download className="mr-2 h-4 w-4" />
+              Export CSV
+            </Button>
+          </CardHeader>
+          <CardContent>
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Unit</TableHead>
+                  <TableHead>Trainings Provided</TableHead>
+                  <TableHead>Participants</TableHead>
+                  <TableHead>Total Credited Hours</TableHead>
+                  <TableHead>Avg Reach</TableHead>
+                  <TableHead>Share</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {trainingsProvidedByUnitRows.length === 0 ? (
+                  <TableRow>
+                    <TableCell colSpan={6} className="h-20 text-center text-muted-foreground">
+                      No training provider analytics available for the selected filters.
+                    </TableCell>
+                  </TableRow>
+                ) : (
+                  trainingsProvidedByUnitRows.map((row) => (
+                    <TableRow key={row.unitId}>
+                      <TableCell>{row.unitName}</TableCell>
+                      <TableCell>{formatNumber(row.trainingsProvided)}</TableCell>
+                      <TableCell>{formatNumber(row.participants)}</TableCell>
+                      <TableCell>{formatDecimal(row.totalHoursCredited, 2)}</TableCell>
+                      <TableCell>{formatDecimal(row.averageParticipantsPerTraining)}</TableCell>
+                      <TableCell>{formatDecimal(row.trainingSharePercent)}%</TableCell>
+                    </TableRow>
+                  ))
+                )}
+              </TableBody>
+            </Table>
+          </CardContent>
+        </Card>
       </section>
 
       <Card className="border-border/60">
@@ -738,6 +861,7 @@ export default function Reports() {
                 <TableHead>Employee No</TableHead>
                 <TableHead>Name</TableHead>
                 <TableHead>Total Hours</TableHead>
+                <TableHead className="text-right">Download</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -746,6 +870,17 @@ export default function Reports() {
                   <TableCell>{row.employeeNo}</TableCell>
                   <TableCell>{row.fullName}</TableCell>
                   <TableCell>{formatDecimal(Number(row.totalHours), 2)}</TableCell>
+                  <TableCell className="text-right">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => handleEmployeeTrainingExport(row.employeeId)}
+                      title={`Download training data for ${row.fullName}`}
+                      aria-label={`Download training data for ${row.fullName}`}
+                    >
+                      <Download className="h-4 w-4" />
+                    </Button>
+                  </TableCell>
                 </TableRow>
               ))}
             </TableBody>
@@ -798,6 +933,7 @@ export default function Reports() {
               <TableRow>
                 <TableHead>Unit</TableHead>
                 <TableHead>Total Hours</TableHead>
+                <TableHead className="text-right">Download</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -805,6 +941,17 @@ export default function Reports() {
                 <TableRow key={row.unitId}>
                   <TableCell>{row.unitName}</TableCell>
                   <TableCell>{formatDecimal(Number(row.totalHours), 2)}</TableCell>
+                  <TableCell className="text-right">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => handleUnitTrainingExport(row.unitId)}
+                      title={`Download training data for ${row.unitName}`}
+                      aria-label={`Download training data for ${row.unitName}`}
+                    >
+                      <Download className="h-4 w-4" />
+                    </Button>
+                  </TableCell>
                 </TableRow>
               ))}
             </TableBody>
