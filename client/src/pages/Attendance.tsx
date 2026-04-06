@@ -306,11 +306,14 @@ export default function Attendance() {
       const normalizedStatus = ["present", "absent", "partial"].includes(rawStatus.toLowerCase())
         ? rawStatus.toLowerCase()
         : "present";
+      const shouldUpdateDuplicate = decisionMap[row.id] === "update";
 
       parsedDates.forEach((attendanceDate) => {
         const importEntryKey = `${row.id}::${attendanceDate}`;
         if (committedImportEntryKeySet.has(importEntryKey)) return;
         const key = `${row.resolvedEmployeeId}:${attendanceDate}`;
+        const isDuplicate = duplicateKeySet.has(key);
+        if (isDuplicate && !shouldUpdateDuplicate) return;
         if (seen.has(key)) return;
         seen.add(key);
         rows.push({
@@ -319,7 +322,7 @@ export default function Attendance() {
           trainingEventId: selectedEventId,
           attendanceDate,
           attendanceStatus: normalizedStatus,
-          workflowStatus: duplicateKeySet.has(key) ? "import_duplicate" : "import_ready",
+          workflowStatus: isDuplicate ? "import_duplicate" : "import_ready",
           source: "import_preview",
           importRowId: row.id,
         });
@@ -332,7 +335,7 @@ export default function Attendance() {
         }
         return b.attendanceDate.localeCompare(a.attendanceDate);
       });
-  }, [committedImportEntryKeySet, duplicateKeySet, importBatch, importRows, selectedEventId]);
+  }, [committedImportEntryKeySet, decisionMap, duplicateKeySet, importBatch, importRows, selectedEventId]);
 
   const filteredAttendance = useMemo<AttendanceDisplayRow[]>(() => {
     const combinedRows: AttendanceDisplayRow[] = [
@@ -381,17 +384,51 @@ export default function Attendance() {
       ]);
       const parsedDates = parseAttendancePreviewDates(rawDateValue);
       if (parsedDates.length === 0) return false;
+      const shouldUpdateDuplicate = decisionMap[row.id] === "update";
 
-      return parsedDates.some((attendanceDate) => !committedImportEntryKeySet.has(`${row.id}::${attendanceDate}`));
+      return parsedDates.some((attendanceDate) => {
+        if (committedImportEntryKeySet.has(`${row.id}::${attendanceDate}`)) {
+          return false;
+        }
+
+        const key = `${row.resolvedEmployeeId}:${attendanceDate}`;
+        return !duplicateKeySet.has(key) || shouldUpdateDuplicate;
+      });
     };
-  }, [committedImportEntryKeySet]);
+  }, [committedImportEntryKeySet, decisionMap, duplicateKeySet]);
+  const hasPendingIssueEntriesForImportRow = useMemo(() => {
+    return (row: any) => {
+      if (row.matchStatus !== "matched" || !row.resolvedEmployeeId) return row.matchStatus !== "matched";
+
+      const raw = (row.rawRowJson ?? {}) as Record<string, string>;
+      const rawDateValue = getImportRowField(raw, [
+        "Date",
+        "attendance_date",
+        "attendanceDate",
+        "Attendance Date",
+        "attendance date",
+      ]);
+      const parsedDates = parseAttendancePreviewDates(rawDateValue);
+      if (parsedDates.length === 0) return false;
+      const shouldUpdateDuplicate = decisionMap[row.id] === "update";
+
+      return parsedDates.some((attendanceDate) => {
+        if (committedImportEntryKeySet.has(`${row.id}::${attendanceDate}`)) {
+          return false;
+        }
+
+        const key = `${row.resolvedEmployeeId}:${attendanceDate}`;
+        return duplicateKeySet.has(key) && !shouldUpdateDuplicate;
+      });
+    };
+  }, [committedImportEntryKeySet, decisionMap, duplicateKeySet]);
   const matchedImportRows = useMemo(
     () => importRows.filter((row) => hasPendingEntriesForImportRow(row)),
     [hasPendingEntriesForImportRow, importRows],
   );
   const issueImportRows = useMemo(
-    () => importRows.filter((row) => row.matchStatus !== "matched"),
-    [importRows],
+    () => importRows.filter((row) => hasPendingIssueEntriesForImportRow(row)),
+    [hasPendingIssueEntriesForImportRow, importRows],
   );
   const hasPendingMatchedImportRows = matchedImportRows.length > 0;
   const matchedPageCount = Math.max(1, Math.ceil(matchedImportRows.length / IMPORT_REVIEW_PAGE_SIZE));
@@ -1318,10 +1355,21 @@ export default function Attendance() {
                             ]);
                             const participants = getImportRowField(raw, ["Participants"]);
                             const email = getImportRowField(raw, ["Email", "email"]);
-                            const key = row.resolvedEmployeeId
-                              ? `${row.resolvedEmployeeId}:${attendanceDate}`
-                              : "";
-                            const isDuplicate = key && duplicateKeySet.has(key);
+                            const parsedDates = parseAttendancePreviewDates(attendanceDate);
+                            const isDuplicate =
+                              !!row.resolvedEmployeeId &&
+                              parsedDates.some((parsedDate) => {
+                                const key = `${row.resolvedEmployeeId}:${parsedDate}`;
+                                return (
+                                  !committedImportEntryKeySet.has(`${row.id}::${parsedDate}`) &&
+                                  duplicateKeySet.has(key)
+                                );
+                              });
+                            const reason =
+                              row.errorMessage ||
+                              (isDuplicate
+                                ? "Matches an existing attendance record. Choose Update to overwrite it, or leave it skipped."
+                                : "-");
                             return (
                               <TableRow key={row.id}>
                                 <TableCell>{email || "-"}</TableCell>
@@ -1331,7 +1379,7 @@ export default function Attendance() {
                                   <Badge variant="outline">{row.matchStatus}</Badge>
                                 </TableCell>
                                 <TableCell className="max-w-[260px] text-xs text-muted-foreground">
-                                  {row.errorMessage || "-"}
+                                  {reason}
                                 </TableCell>
                                 <TableCell>
                                   {isDuplicate ? (
