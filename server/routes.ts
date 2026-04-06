@@ -2583,11 +2583,11 @@ export async function registerRoutes(
         .orderBy(desc(attendanceImportBatches.createdAt))
         .limit(1);
       if (existingBatch) {
-        if (existingBatch.status !== "committed") {
-          const existingRows = await db
-            .select()
-            .from(attendanceImportRows)
-            .where(eq(attendanceImportRows.batchId, existingBatch.id));
+        const existingRows = await db
+          .select()
+          .from(attendanceImportRows)
+          .where(eq(attendanceImportRows.batchId, existingBatch.id));
+        if (existingRows.length > 0 && existingBatch.status !== "committed") {
           return res.status(200).json({
             batch: existingBatch,
             rows: existingRows,
@@ -2785,7 +2785,9 @@ export async function registerRoutes(
                 rowsToInsert.map((row) => ({
                   batchId: batch.id,
                   rawRowJson: row.rawRowJson,
-                  employeeNo: row.employeeNo,
+                  // Keep this within the current schema limit so one long participant name
+                  // does not cause the entire batch row insert to fail.
+                  employeeNo: row.employeeNo.slice(0, 50),
                   resolvedEmployeeId: row.resolvedEmployeeId,
                   matchStatus: row.matchStatus,
                   errorMessage: row.errorMessage,
@@ -2838,6 +2840,53 @@ export async function registerRoutes(
         .from(attendanceImportRows)
         .where(eq(attendanceImportRows.batchId, batchId));
       res.json({ batch, rows });
+    },
+  );
+
+  api.delete(
+    "/attendance/import/:batchId",
+    requireAnyRoleOrSuperAdmin(["encoder", "unit_head", "hr_qa_approver"]),
+    async (req, res) => {
+      const batchId = getRouteParam(req.params.batchId);
+      const [batch] = await db
+        .select()
+        .from(attendanceImportBatches)
+        .where(eq(attendanceImportBatches.id, batchId))
+        .limit(1);
+      if (!batch) {
+        return res.status(404).json({ message: "Batch not found." });
+      }
+      if (batch.status === "committed") {
+        return res.status(409).json({ message: "Committed import batches cannot be removed." });
+      }
+
+      const [trainingEvent] = await db
+        .select({ ownerUnitId: trainingEvents.ownerUnitId })
+        .from(trainingEvents)
+        .where(and(eq(trainingEvents.id, batch.trainingEventId), trainingEventNotDeletedCondition()))
+        .limit(1);
+      if (!trainingEvent) {
+        return res.status(404).json({ message: "Training event not found." });
+      }
+
+      const scopeUnitIds = await getScopedUnitIds(req.user!);
+      if (!scopeUnitIds.includes(trainingEvent.ownerUnitId)) {
+        return res.status(403).json({ message: "Unit out of scope." });
+      }
+
+      await db.delete(attendanceImportBatches).where(eq(attendanceImportBatches.id, batchId));
+
+      await logAudit({
+        actorUserId: req.user!.id,
+        action: "attendance_import.delete",
+        entityType: "attendance_import_batch",
+        entityId: batchId,
+        beforeJson: batch,
+        afterJson: null,
+        ip: req.ip,
+      });
+
+      res.json({ ok: true });
     },
   );
 
@@ -2937,10 +2986,25 @@ export async function registerRoutes(
         .select()
         .from(attendanceImportRows)
         .where(eq(attendanceImportRows.batchId, batchId));
+      if (rows.length === 0) {
+        return res.status(400).json({
+          message:
+            "This import batch has no saved row details. Please re-upload the CSV to rebuild the matched rows before committing.",
+        });
+      }
 
       const decisions = new Map(parsed.data.decisions?.map((d) => [d.rowId, d.action]));
       const results = { created: 0, updated: 0, skipped: 0 };
       const processedAttendanceKeys = new Set<string>();
+      const batchSummary =
+        batch.summaryJson && typeof batch.summaryJson === "object" && !Array.isArray(batch.summaryJson)
+          ? { ...(batch.summaryJson as Record<string, unknown>) }
+          : {};
+      const committedEntryKeys = new Set(
+        Array.isArray(batchSummary.committedEntryKeys)
+          ? batchSummary.committedEntryKeys.filter((value): value is string => typeof value === "string")
+          : [],
+      );
 
       for (const row of rows) {
         if (row.matchStatus !== "matched" || !row.resolvedEmployeeId) {
@@ -2973,6 +3037,10 @@ export async function registerRoutes(
           : "present";
 
         for (const attendanceDate of parsedDates.dates) {
+          const importEntryKey = `${row.id}::${attendanceDate}`;
+          if (committedEntryKeys.has(importEntryKey)) {
+            continue;
+          }
           const importAttendanceKey = `${row.resolvedEmployeeId}::${attendanceDate}`;
           if (processedAttendanceKeys.has(importAttendanceKey)) {
             results.skipped += 1;
@@ -3009,6 +3077,7 @@ export async function registerRoutes(
                 })
                 .where(eq(attendanceRecords.id, existing.id));
               results.updated += 1;
+              committedEntryKeys.add(importEntryKey);
               continue;
             }
             const decision = decisions.get(row.id) ?? "skip";
@@ -3026,6 +3095,7 @@ export async function registerRoutes(
               })
               .where(and(eq(attendanceRecords.id, existing.id), attendanceNotDeletedCondition()));
             results.updated += 1;
+            committedEntryKeys.add(importEntryKey);
           } else {
             await db.insert(attendanceRecords).values({
               trainingEventId: batch.trainingEventId,
@@ -3038,14 +3108,42 @@ export async function registerRoutes(
               updatedBy: req.user!.id,
             });
             results.created += 1;
+            committedEntryKeys.add(importEntryKey);
           }
         }
       }
 
-      await db
+      const hasPendingRows = rows.some((row) => {
+        if (row.matchStatus !== "matched" || !row.resolvedEmployeeId) {
+          return true;
+        }
+        const raw = row.rawRowJson as Record<string, string>;
+        const rawDateValue =
+          raw.Date ||
+          raw.attendance_date ||
+          raw.attendanceDate ||
+          raw["Attendance Date"] ||
+          raw["attendance date"];
+        const parsedDates = parseAttendanceCsvDates(rawDateValue);
+        if (parsedDates.error || parsedDates.dates.length === 0) {
+          return true;
+        }
+        return parsedDates.dates.some((attendanceDate) => !committedEntryKeys.has(`${row.id}::${attendanceDate}`));
+      });
+
+      const nextStatus = hasPendingRows ? "needs_review" : "committed";
+      const [updatedBatch] = await db
         .update(attendanceImportBatches)
-        .set({ status: "committed" })
-        .where(eq(attendanceImportBatches.id, batchId));
+        .set({
+          status: nextStatus,
+          summaryJson: {
+            ...batchSummary,
+            committedEntryKeys: Array.from(committedEntryKeys),
+            lastCommitResults: results,
+          },
+        })
+        .where(eq(attendanceImportBatches.id, batchId))
+        .returning();
 
       await logAudit({
         actorUserId: req.user!.id,
@@ -3056,7 +3154,7 @@ export async function registerRoutes(
         ip: req.ip,
       });
 
-      res.json({ results });
+      res.json({ results, batch: updatedBatch, rows });
     },
   );
 
@@ -4016,6 +4114,7 @@ export async function registerRoutes(
         id: trainingEvents.id,
         title: trainingEvents.title,
         category: trainingEvents.category,
+        provider: trainingEvents.provider,
         deliveryMode: trainingEvents.deliveryMode,
         ownerUnitId: trainingEvents.ownerUnitId,
         startDate: trainingEvents.startDate,
@@ -4090,7 +4189,6 @@ export async function registerRoutes(
       .where(and(...attendanceFilters));
 
     const participantSetsByTraining = new Map<string, Set<string>>();
-    const participantSetsByOwnerUnit = new Map<string, Set<string>>();
     const creditedHoursByTraining = new Map<string, number>();
     const trainingById = new Map(scopedTrainingRows.map((row) => [row.id, row]));
 
@@ -4101,11 +4199,6 @@ export async function registerRoutes(
       const participantSet = participantSetsByTraining.get(row.trainingEventId) || new Set<string>();
       participantSet.add(row.employeeId);
       participantSetsByTraining.set(row.trainingEventId, participantSet);
-
-      const ownerUnitParticipantSet =
-        participantSetsByOwnerUnit.get(training.ownerUnitId) || new Set<string>();
-      ownerUnitParticipantSet.add(row.employeeId);
-      participantSetsByOwnerUnit.set(training.ownerUnitId, ownerUnitParticipantSet);
 
       creditedHoursByTraining.set(
         row.trainingEventId,
@@ -4180,28 +4273,35 @@ export async function registerRoutes(
 
     const ownerUnitStats = new Map<
       string,
-      { unitId: string; unitName: string; trainingCount: number; totalHoursCredited: number }
+      {
+        unitId: string;
+        unitName: string;
+        trainingCount: number;
+        participants: number;
+        totalHoursCredited: number;
+      }
     >();
     for (const row of scopedTrainingRows) {
-      const existing = ownerUnitStats.get(row.ownerUnitId) || {
-        unitId: row.ownerUnitId,
-        unitName: ownerUnitNameById.get(row.ownerUnitId) || "Unknown Unit",
+      const providerLabel =
+        row.provider?.trim() || ownerUnitNameById.get(row.ownerUnitId) || "Unknown Provider";
+      const existing = ownerUnitStats.get(providerLabel) || {
+        unitId: providerLabel,
+        unitName: providerLabel,
         trainingCount: 0,
+        participants: 0,
         totalHoursCredited: 0,
       };
       existing.trainingCount += 1;
+      existing.participants += participantSetsByTraining.get(row.id)?.size || 0;
       existing.totalHoursCredited = roundTo(
         existing.totalHoursCredited + (creditedHoursByTraining.get(row.id) || 0),
         2,
       );
-      ownerUnitStats.set(row.ownerUnitId, existing);
+      ownerUnitStats.set(providerLabel, existing);
     }
 
     const ownerUnits = Array.from(ownerUnitStats.values())
-      .map((row) => ({
-        ...row,
-        participants: participantSetsByOwnerUnit.get(row.unitId)?.size || 0,
-      }))
+      .map((row) => row)
       .sort((a, b) => {
         if (b.totalHoursCredited !== a.totalHoursCredited) {
           return b.totalHoursCredited - a.totalHoursCredited;
@@ -4244,7 +4344,7 @@ export async function registerRoutes(
     if (ownerUnits[0] && totalTrainings > 0) {
       const leadUnitShare = roundTo((ownerUnits[0].trainingCount / totalTrainings) * 100, 1);
       insights.push(
-        `${ownerUnits[0].unitName} currently owns ${leadUnitShare}% of scoped trainings, so training supply is concentrated there.`,
+        `${ownerUnits[0].unitName} currently provides ${leadUnitShare}% of scoped trainings, so training supply is concentrated there.`,
       );
     }
     if (approvedTrainings === totalTrainings && totalTrainings > 0) {

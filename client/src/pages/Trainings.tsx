@@ -9,7 +9,18 @@ import {
   CardTitle,
   CardDescription,
 } from "@/components/ui/card";
-import { Calendar as CalendarIcon, Users, Clock, MoreVertical, Plus, Copy, Download } from "lucide-react";
+import { cn } from "@/lib/utils";
+import {
+  Calendar as CalendarIcon,
+  Users,
+  Clock,
+  MoreVertical,
+  Plus,
+  Copy,
+  Download,
+  LayoutGrid,
+  List,
+} from "lucide-react";
 import { useUser } from "@/hooks/use-user";
 import { useQuery } from "@tanstack/react-query";
 import { apiRequest, getQueryFn, queryClient } from "@/lib/queryClient";
@@ -54,6 +65,8 @@ type TrainingForm = {
   visibilityScope: string;
   isMandatory: boolean;
 };
+
+type LayoutMode = "grid" | "list";
 
 const emptyForm: TrainingForm = {
   title: "",
@@ -100,6 +113,30 @@ const workflowBadgeClassByStatus: Record<string, string> = {
   locked: "bg-indigo-50 text-indigo-700 border-indigo-200",
 };
 
+const formatEventDate = (value: unknown) => {
+  if (typeof value !== "string" || !value) return "Date unavailable";
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return value;
+  return parsed.toLocaleDateString("en-US", {
+    month: "long",
+    day: "numeric",
+    year: "numeric",
+  });
+};
+
+const getEventSortTime = (event: any) => {
+  const updatedAtTime = typeof event?.updatedAt === "string" ? new Date(event.updatedAt).getTime() : Number.NaN;
+  if (Number.isFinite(updatedAtTime)) return updatedAtTime;
+
+  const createdAtTime = typeof event?.createdAt === "string" ? new Date(event.createdAt).getTime() : Number.NaN;
+  if (Number.isFinite(createdAtTime)) return createdAtTime;
+
+  const startDateTime = typeof event?.startDate === "string" ? new Date(event.startDate).getTime() : Number.NaN;
+  if (Number.isFinite(startDateTime)) return startDateTime;
+
+  return 0;
+};
+
 function escapeCsvValue(value: unknown) {
   if (value === null || value === undefined) return "";
   const stringValue = String(value);
@@ -133,6 +170,19 @@ function downloadCsvFile(fileName: string, content: string) {
   window.URL.revokeObjectURL(url);
 }
 
+function parseApiError(error: unknown) {
+  const raw = error instanceof Error ? error.message.replace(/^Error:\s*/, "") : "Request failed.";
+  const jsonMatch = raw.match(/\{.*\}$/);
+  if (!jsonMatch) return raw;
+
+  try {
+    const parsed = JSON.parse(jsonMatch[0]) as { message?: string };
+    return parsed.message || raw;
+  } catch {
+    return raw;
+  }
+}
+
 export default function Trainings() {
   const { user } = useUser();
   const { toast } = useToast();
@@ -145,8 +195,10 @@ export default function Trainings() {
   const [archiveTargetEvent, setArchiveTargetEvent] = useState<any | null>(null);
   const [archiveReason, setArchiveReason] = useState("");
   const [isSavingEvent, setIsSavingEvent] = useState(false);
-  const [submittingEventId, setSubmittingEventId] = useState<string | null>(null);
+  const [submittingEventIds, setSubmittingEventIds] = useState<Record<string, boolean>>({});
   const [highlightedEventId, setHighlightedEventId] = useState<string | null>(null);
+  const [recentEventId, setRecentEventId] = useState<string | null>(null);
+  const [layoutMode, setLayoutMode] = useState<LayoutMode>("grid");
   const [form, setForm] = useState<TrainingForm>(emptyForm);
   const focusTrainingId = new URLSearchParams(window.location.search).get("focusTrainingId");
 
@@ -189,31 +241,39 @@ export default function Trainings() {
     return [form.provider, ...internalProviderOptions];
   }, [internalProviderOptions, form.provider]);
   const filtered = useMemo(() => {
-    return events.filter((event: any) => {
-      const matchesStatus =
-        statusFilter === "All"
-          ? true
-          : statusFilter === "Drafts"
-            ? event.workflowStatus === "draft"
-            : statusFilter === "Submitted"
-              ? event.workflowStatus === "submitted"
-              : statusFilter === "Approved"
-                ? event.workflowStatus === "approved"
-                : statusFilter === "Locked"
-                  ? event.workflowStatus === "locked"
-                  : true;
+    return events
+      .filter((event: any) => {
+        const matchesStatus =
+          statusFilter === "All"
+            ? true
+            : statusFilter === "Drafts"
+              ? event.workflowStatus === "draft"
+              : statusFilter === "Submitted"
+                ? event.workflowStatus === "submitted"
+                : statusFilter === "Approved"
+                  ? event.workflowStatus === "approved"
+                  : statusFilter === "Locked"
+                    ? event.workflowStatus === "locked"
+                    : true;
 
-      const normalizedCategory = normalizeCategory(event.category);
-      const matchesCategory =
-        categoryFilter === "All Types"
-          ? true
-          : categoryFilter === "Internal"
-            ? normalizedCategory === "internal"
-            : normalizedCategory === "external";
+        const normalizedCategory = normalizeCategory(event.category);
+        const matchesCategory =
+          categoryFilter === "All Types"
+            ? true
+            : categoryFilter === "Internal"
+              ? normalizedCategory === "internal"
+              : normalizedCategory === "external";
 
-      return matchesStatus && matchesCategory;
-    });
-  }, [events, statusFilter, categoryFilter]);
+        return matchesStatus && matchesCategory;
+      })
+      .sort((a: any, b: any) => {
+        if (recentEventId) {
+          if (a.id === recentEventId) return -1;
+          if (b.id === recentEventId) return 1;
+        }
+        return getEventSortTime(b) - getEventSortTime(a);
+      });
+  }, [events, statusFilter, categoryFilter, recentEventId]);
   const isPageLoading = trainingsLoading || unitsLoading || employeesLoading;
 
   const handleExportTrainings = () => {
@@ -250,11 +310,22 @@ export default function Trainings() {
     if (!focusTrainingId) return;
     if (!events.some((event: any) => event.id === focusTrainingId)) return;
     setHighlightedEventId(focusTrainingId);
+    const nextUrl = new URL(window.location.href);
+    nextUrl.searchParams.delete("focusTrainingId");
+    window.history.replaceState({}, "", `${nextUrl.pathname}${nextUrl.search}${nextUrl.hash}`);
     const timer = window.setTimeout(() => {
       setHighlightedEventId((current) => (current === focusTrainingId ? null : current));
     }, 5000);
     return () => window.clearTimeout(timer);
   }, [focusTrainingId, events]);
+
+  useEffect(() => {
+    if (!recentEventId) return;
+    const timer = window.setTimeout(() => {
+      setHighlightedEventId((current) => (current === recentEventId ? null : current));
+    }, 5000);
+    return () => window.clearTimeout(timer);
+  }, [recentEventId]);
 
   const resetForm = () => {
     setForm(emptyForm);
@@ -350,9 +421,21 @@ export default function Trainings() {
         isMandatory: form.isMandatory,
       };
       if (editingEventId) {
-        await apiRequest("PUT", `/api/training-events/${editingEventId}`, payload);
+        const response = await apiRequest("PUT", `/api/training-events/${editingEventId}`, payload);
+        const result = await response.json();
+        const updatedEventId = result?.trainingEvent?.id;
+        if (typeof updatedEventId === "string" && updatedEventId.length > 0) {
+          setRecentEventId(updatedEventId);
+          setHighlightedEventId(updatedEventId);
+        }
       } else {
-        await apiRequest("POST", "/api/training-events", payload);
+        const response = await apiRequest("POST", "/api/training-events", payload);
+        const result = await response.json();
+        const createdEventId = result?.trainingEvent?.id;
+        if (typeof createdEventId === "string" && createdEventId.length > 0) {
+          setRecentEventId(createdEventId);
+          setHighlightedEventId(createdEventId);
+        }
       }
       queryClient.invalidateQueries({ queryKey: ["/api/training-events"] });
       setIsDialogOpen(false);
@@ -375,13 +458,27 @@ export default function Trainings() {
   };
 
   const handleSubmit = async (eventId: string) => {
+    if (submittingEventIds[eventId]) return;
+
     try {
-      setSubmittingEventId(eventId);
+      setSubmittingEventIds((prev) => ({ ...prev, [eventId]: true }));
       await apiRequest("POST", `/api/training-events/${eventId}/submit`);
-      queryClient.invalidateQueries({ queryKey: ["/api/training-events"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/approvals"] });
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["/api/training-events"] }),
+        queryClient.invalidateQueries({ queryKey: ["/api/approvals"] }),
+      ]);
+    } catch (error) {
+      toast({
+        variant: "destructive",
+        title: "Failed to submit training event",
+        description: parseApiError(error),
+      });
     } finally {
-      setSubmittingEventId(null);
+      setSubmittingEventIds((prev) => {
+        const next = { ...prev };
+        delete next[eventId];
+        return next;
+      });
     }
   };
 
@@ -589,136 +686,272 @@ export default function Trainings() {
         </div>
       </div>
 
-      <div className="space-y-3">
-        <div className="flex items-center gap-4 overflow-x-auto pb-2">
-          {["All", "Drafts", "Submitted", "Approved", "Locked"].map((value) => (
-            <Button
-              key={value}
-              variant={statusFilter === value ? "default" : "outline"}
-              onClick={() => setStatusFilter(value)}
-              className="rounded-full"
-              size="sm"
-            >
-              {value}
-            </Button>
-          ))}
+      <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
+        <div className="space-y-3">
+          <div className="flex items-center gap-4 overflow-x-auto pb-2">
+            {["All", "Drafts", "Submitted", "Approved", "Locked"].map((value) => (
+              <Button
+                key={value}
+                variant={statusFilter === value ? "default" : "outline"}
+                onClick={() => setStatusFilter(value)}
+                className="rounded-full"
+                size="sm"
+              >
+                {value}
+              </Button>
+            ))}
+          </div>
+          <div className="flex items-center gap-2 overflow-x-auto pb-2">
+            {["All Types", "Internal", "External"].map((value) => (
+              <Button
+                key={value}
+                variant={categoryFilter === value ? "default" : "outline"}
+                onClick={() => setCategoryFilter(value)}
+                className="rounded-full"
+                size="sm"
+              >
+                {value}
+              </Button>
+            ))}
+          </div>
         </div>
-        <div className="flex items-center gap-2 overflow-x-auto pb-2">
-          {["All Types", "Internal", "External"].map((value) => (
-            <Button
-              key={value}
-              variant={categoryFilter === value ? "default" : "outline"}
-              onClick={() => setCategoryFilter(value)}
-              className="rounded-full"
-              size="sm"
-            >
-              {value}
-            </Button>
-          ))}
+        <div className="inline-flex items-center gap-1 self-start rounded-full border border-border/70 bg-background p-1 shadow-sm">
+          <Button
+            type="button"
+            variant={layoutMode === "grid" ? "default" : "ghost"}
+            size="sm"
+            className="rounded-full px-3"
+            onClick={() => setLayoutMode("grid")}
+            aria-pressed={layoutMode === "grid"}
+          >
+            <LayoutGrid className="mr-2 h-4 w-4" />
+            Grid
+          </Button>
+          <Button
+            type="button"
+            variant={layoutMode === "list" ? "default" : "ghost"}
+            size="sm"
+            className="rounded-full px-3"
+            onClick={() => setLayoutMode("list")}
+            aria-pressed={layoutMode === "list"}
+          >
+            <List className="mr-2 h-4 w-4" />
+            List
+          </Button>
         </div>
       </div>
 
-      <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-3">
+      <div
+        className={cn(
+          "grid",
+          layoutMode === "grid" ? "gap-6 md:grid-cols-2 lg:grid-cols-3" : "grid-cols-1 gap-4",
+        )}
+      >
         {filtered.map((event: any) => {
           const canEdit =
             isSuperAdmin || event.workflowStatus === "draft" || event.workflowStatus === "returned";
           return (
             <Card
               key={event.id}
-              className={`group border-border/60 transition-all hover:shadow-lg ${
-                highlightedEventId === event.id ? "ring-2 ring-primary/50 bg-primary/5" : ""
-              }`}
+              className={cn(
+                "group border-border/60 transition-all hover:shadow-lg",
+                layoutMode === "list" && "overflow-hidden",
+                highlightedEventId === event.id && "ring-2 ring-primary/50 bg-primary/5",
+              )}
             >
-              <CardHeader>
-                <div className="flex items-start justify-between">
-                  <Badge variant="outline" className="mb-2 w-fit border-primary/20 bg-primary/5 text-primary">
-                    {formatCategoryLabel(event.category) || event.deliveryMode}
-                  </Badge>
-                  {canCreate ? (
-                    <DropdownMenu>
-                      <DropdownMenuTrigger asChild>
-                        <Button variant="ghost" size="icon" className="-mr-2 -mt-2 h-8 w-8 text-muted-foreground">
-                          <MoreVertical className="h-4 w-4" />
-                        </Button>
-                      </DropdownMenuTrigger>
-                      <DropdownMenuContent align="end">
-                        {canEdit ? (
-                          <DropdownMenuItem onClick={() => openEditDialog(event)}>
-                            Edit Details
-                          </DropdownMenuItem>
-                        ) : null}
-                        <DropdownMenuItem onClick={() => copyAsTemplate(event)}>
-                          <Copy className="mr-2 h-4 w-4" />
-                          Copy as Template
-                        </DropdownMenuItem>
-                        <DropdownMenuItem
-                          className="text-destructive"
-                          onClick={() => {
-                            setArchiveTargetEvent(event);
-                            setArchiveReason("");
-                            setArchiveDialogOpen(true);
-                          }}
-                        >
-                          Archive Event
-                        </DropdownMenuItem>
-                      </DropdownMenuContent>
-                    </DropdownMenu>
-                  ) : null}
-                </div>
-                <CardTitle className="h-12 line-clamp-2 leading-tight">{event.title}</CardTitle>
-                <CardDescription className="mt-1 flex items-center">
-                  <CalendarIcon className="mr-2 h-3.5 w-3.5" />
-                  {new Date(event.startDate).toLocaleDateString("en-US", {
-                    month: "long",
-                    day: "numeric",
-                    year: "numeric",
-                  })}
-                </CardDescription>
-              </CardHeader>
-              <CardContent>
-                <div className="space-y-2 text-sm text-muted-foreground">
-                  <div className="flex items-center">
-                    <Clock className="mr-2 h-3.5 w-3.5" />
-                    {event.hours} Hours Credit
-                  </div>
-                  <div className="flex items-center">
-                    <Users className="mr-2 h-3.5 w-3.5" />
-                    {event.provider || (normalizeCategory(event.category) === "internal" ? "Internal" : "-")}
-                  </div>
-                </div>
-              </CardContent>
-              <CardFooter className="border-t bg-muted/20 pt-2">
-                <div className="flex w-full items-center justify-between">
-                  <Badge
-                    variant="outline"
-                    className={workflowBadgeClassByStatus[event.workflowStatus] || "bg-muted text-foreground border-border"}
+              <div
+                className={cn(
+                  layoutMode === "list" &&
+                    "grid gap-0 md:grid-cols-[minmax(0,1.65fr)_minmax(220px,0.85fr)_minmax(144px,0.45fr)]",
+                )}
+              >
+                <CardHeader className={cn(layoutMode === "list" && "pb-4 md:pb-6")}>
+                  <div
+                    className={cn(
+                      "flex items-start",
+                      layoutMode === "grid" ? "justify-between" : "gap-3",
+                    )}
                   >
-                    {formatWorkflowLabel(event.workflowStatus)}
-                  </Badge>
-                  <div className="flex items-center gap-2">
-                    {canSubmit && (event.workflowStatus === "draft" || event.workflowStatus === "returned") ? (
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={() => handleSubmit(event.id)}
-                        disabled={submittingEventId === event.id}
-                      >
-                        {submittingEventId === event.id ? (
-                          <>
-                            <Spinner className="mr-2 h-4 w-4" />
-                            Submitting...
-                          </>
-                        ) : (
-                          "Submit"
-                        )}
-                      </Button>
+                    <Badge
+                      variant="outline"
+                      className="mb-2 w-fit border-primary/20 bg-primary/5 text-primary"
+                    >
+                      {formatCategoryLabel(event.category) || event.deliveryMode}
+                    </Badge>
+                    {layoutMode === "grid" && canCreate ? (
+                      <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-8 w-8 shrink-0 -mr-2 -mt-2 text-muted-foreground"
+                          >
+                            <MoreVertical className="h-4 w-4" />
+                          </Button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent align="end">
+                          {canEdit ? (
+                            <DropdownMenuItem onClick={() => openEditDialog(event)}>
+                              Edit Details
+                            </DropdownMenuItem>
+                          ) : null}
+                          <DropdownMenuItem onClick={() => copyAsTemplate(event)}>
+                            <Copy className="mr-2 h-4 w-4" />
+                            Copy as Template
+                          </DropdownMenuItem>
+                          <DropdownMenuItem
+                            className="text-destructive"
+                            onClick={() => {
+                              setArchiveTargetEvent(event);
+                              setArchiveReason("");
+                              setArchiveDialogOpen(true);
+                            }}
+                          >
+                            Archive Event
+                          </DropdownMenuItem>
+                        </DropdownMenuContent>
+                      </DropdownMenu>
                     ) : null}
-                    <Button variant="link" size="sm" className="h-auto p-0" onClick={() => setDetailsEvent(event)}>
-                      View Details
-                    </Button>
                   </div>
-                </div>
-              </CardFooter>
+                  <CardTitle
+                    className={cn(
+                      "leading-tight",
+                      layoutMode === "grid" ? "h-12 line-clamp-2" : "line-clamp-2 text-xl",
+                    )}
+                  >
+                    {event.title}
+                  </CardTitle>
+                  <CardDescription className="mt-1 flex items-center">
+                    <CalendarIcon className="mr-2 h-3.5 w-3.5" />
+                    {formatEventDate(event.startDate)}
+                  </CardDescription>
+                </CardHeader>
+                <CardContent className={cn(layoutMode === "list" && "pt-0 md:flex md:items-center md:py-6")}>
+                  <div className="space-y-2 text-sm text-muted-foreground">
+                    <div className="flex items-center">
+                      <Clock className="mr-2 h-3.5 w-3.5" />
+                      {event.hours} Hours Credit
+                    </div>
+                    <div className="flex items-center">
+                      <Users className="mr-2 h-3.5 w-3.5" />
+                      {event.provider || (normalizeCategory(event.category) === "internal" ? "Internal" : "-")}
+                    </div>
+                  </div>
+                </CardContent>
+                <CardFooter
+                  className={cn(
+                    "border-t bg-muted/20 pt-2",
+                    layoutMode === "list" &&
+                      "border-t md:border-l md:border-t-0 md:bg-muted/10 md:px-4 md:py-4",
+                  )}
+                >
+                  {layoutMode === "list" ? (
+                    <div className="flex w-full flex-col gap-4 md:h-full md:min-w-[144px] md:items-end">
+                      <div className="flex w-full justify-end">
+                        <DropdownMenu>
+                          <DropdownMenuTrigger asChild>
+                            <Button variant="ghost" size="icon" className="h-8 w-8 text-muted-foreground">
+                              <MoreVertical className="h-4 w-4" />
+                            </Button>
+                          </DropdownMenuTrigger>
+                          <DropdownMenuContent align="end">
+                            <DropdownMenuItem onClick={() => setDetailsEvent(event)}>
+                              View Details
+                            </DropdownMenuItem>
+                            {canEdit ? (
+                              <DropdownMenuItem onClick={() => openEditDialog(event)}>
+                                Edit Details
+                              </DropdownMenuItem>
+                            ) : null}
+                            {canCreate ? (
+                              <DropdownMenuItem onClick={() => copyAsTemplate(event)}>
+                                <Copy className="mr-2 h-4 w-4" />
+                                Copy as Template
+                              </DropdownMenuItem>
+                            ) : null}
+                            {canCreate ? (
+                              <DropdownMenuItem
+                                className="text-destructive"
+                                onClick={() => {
+                                  setArchiveTargetEvent(event);
+                                  setArchiveReason("");
+                                  setArchiveDialogOpen(true);
+                                }}
+                              >
+                                Archive Event
+                              </DropdownMenuItem>
+                            ) : null}
+                          </DropdownMenuContent>
+                        </DropdownMenu>
+                      </div>
+                      <div className="flex w-full flex-1 flex-col items-end justify-center gap-3">
+                        <Badge
+                          variant="outline"
+                          className={cn(
+                            "inline-flex h-8 w-auto items-center rounded-full px-3 py-1 text-sm font-medium",
+                            workflowBadgeClassByStatus[event.workflowStatus] ||
+                              "bg-muted text-foreground border-border",
+                          )}
+                        >
+                          {formatWorkflowLabel(event.workflowStatus)}
+                        </Badge>
+                        {canSubmit && (event.workflowStatus === "draft" || event.workflowStatus === "returned") ? (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="min-w-[112px]"
+                            onClick={() => handleSubmit(event.id)}
+                            disabled={Boolean(submittingEventIds[event.id])}
+                          >
+                            {submittingEventIds[event.id] ? (
+                              <>
+                                <Spinner className="mr-2 h-4 w-4" />
+                                Submitting...
+                              </>
+                            ) : (
+                              "Submit"
+                            )}
+                          </Button>
+                        ) : null}
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="flex w-full items-center justify-between gap-3">
+                      <Badge
+                        variant="outline"
+                        className={
+                          workflowBadgeClassByStatus[event.workflowStatus] ||
+                          "bg-muted text-foreground border-border"
+                        }
+                      >
+                        {formatWorkflowLabel(event.workflowStatus)}
+                      </Badge>
+                      <div className="flex items-center gap-2">
+                        {canSubmit && (event.workflowStatus === "draft" || event.workflowStatus === "returned") ? (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => handleSubmit(event.id)}
+                            disabled={Boolean(submittingEventIds[event.id])}
+                          >
+                            {submittingEventIds[event.id] ? (
+                              <>
+                                <Spinner className="mr-2 h-4 w-4" />
+                                Submitting...
+                              </>
+                            ) : (
+                              "Submit"
+                            )}
+                          </Button>
+                        ) : null}
+                        <Button variant="link" size="sm" className="h-auto p-0" onClick={() => setDetailsEvent(event)}>
+                          View Details
+                        </Button>
+                      </div>
+                    </div>
+                  )}
+                </CardFooter>
+              </div>
             </Card>
           );
         })}

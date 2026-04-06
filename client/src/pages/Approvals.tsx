@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import {
   Card,
   CardContent,
@@ -13,7 +13,6 @@ import { CheckCircle2, XCircle, FileText, Lock, RotateCcw } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { apiRequest, getQueryFn, queryClient } from "@/lib/queryClient";
 import { LoadingState } from "@/components/ui/loading-state";
-import { useState } from "react";
 import {
   Dialog,
   DialogContent,
@@ -23,6 +22,7 @@ import {
 } from "@/components/ui/dialog";
 import { Textarea } from "@/components/ui/textarea";
 import { Spinner } from "@/components/ui/spinner";
+import { useToast } from "@/hooks/use-toast";
 
 type ApprovalState = "submitted" | "approved" | "locked";
 
@@ -47,6 +47,19 @@ type ApprovalItem = {
   recordIds?: string[];
   participants?: ApprovalParticipant[];
 };
+
+function parseApiError(error: unknown) {
+  const raw = error instanceof Error ? error.message.replace(/^Error:\s*/, "") : "Request failed.";
+  const jsonMatch = raw.match(/\{.*\}$/);
+  if (!jsonMatch) return raw;
+
+  try {
+    const parsed = JSON.parse(jsonMatch[0]) as { message?: string };
+    return parsed.message || raw;
+  } catch {
+    return raw;
+  }
+}
 
 const formatDate = (value?: string | null) => {
   if (!value) return "N/A";
@@ -93,9 +106,10 @@ const typeBadgeClassByType: Record<ApprovalItem["type"], string> = {
 };
 
 export default function Approvals() {
+  const { toast } = useToast();
   const [returnDialogItem, setReturnDialogItem] = useState<ApprovalItem | null>(null);
   const [returnNotes, setReturnNotes] = useState("");
-  const [pendingActionKey, setPendingActionKey] = useState<string | null>(null);
+  const [pendingActionKeys, setPendingActionKeys] = useState<Record<string, boolean>>({});
   const { data, isLoading: approvalsLoading } = useQuery<any>({
     queryKey: ["/api/approvals"],
     queryFn: getQueryFn({ on401: "throw" }),
@@ -202,20 +216,18 @@ export default function Approvals() {
     });
 
     return {
-      id: firstRecord.importBatchId || `batch-${firstRecord.trainingEventId}`,
+      id: `training-attendance-${firstRecord.trainingEventId}`,
       type: "attendance_batch",
       state,
-      title: trainingEvent?.title || "Bulk Attendance Upload",
-      subtitle: `Batch upload | ${participants.length} participant${participants.length === 1 ? "" : "s"}`,
+      title: trainingEvent?.title || "Attendance Submission Batch",
+      subtitle: `${participants.length} participant${participants.length === 1 ? "" : "s"} | ${attendanceDates || "N/A"}`,
       purpose:
-        "Review the participant list from this bulk upload, then approve or return the whole batch at once.",
+        "Review the submitted attendance for this training, then approve or return the whole training batch at once.",
       fields: [
-        { label: "Record Type", value: "Attendance Import Batch" },
+        { label: "Record Type", value: "Training Attendance Batch" },
         { label: "Training Event", value: trainingEvent?.title || "Unknown training" },
         { label: "Participants", value: String(participants.length) },
         { label: "Attendance Date(s)", value: attendanceDates || "N/A" },
-        { label: "Source File", value: firstRecord.importBatchFileName || "CSV upload" },
-        { label: "Imported At", value: formatDate(firstRecord.importBatchCreatedAt) },
       ],
       returnNotes: firstRecord.returnNotes,
       recordIds: records.map((record) => record.id),
@@ -226,50 +238,49 @@ export default function Approvals() {
   const submittedAttendanceRecords = attendance.submitted as any[];
   const attendanceBatchMap = new Map<
     string,
-    { batchId: string; records: any[]; batchCreatedAt?: string | null }
+    { trainingEventId: string; records: any[]; latestUpdatedAt?: string | null }
   >();
-  const individualSubmittedAttendance: any[] = [];
 
   for (const record of submittedAttendanceRecords) {
-    if (!record.importBatchId) {
-      individualSubmittedAttendance.push(record);
-      continue;
-    }
-    const existing = attendanceBatchMap.get(record.importBatchId);
+    const batchKey = record.trainingEventId;
+    const existing = attendanceBatchMap.get(batchKey);
+    const recordUpdatedAt = record.updatedAt || record.createdAt || null;
     if (existing) {
       existing.records.push(record);
+      const existingTime = existing.latestUpdatedAt ? new Date(existing.latestUpdatedAt).getTime() : 0;
+      const nextTime = recordUpdatedAt ? new Date(recordUpdatedAt).getTime() : 0;
+      if (nextTime >= existingTime) {
+        existing.latestUpdatedAt = recordUpdatedAt;
+      }
     } else {
-      attendanceBatchMap.set(record.importBatchId, {
-        batchId: record.importBatchId,
+      attendanceBatchMap.set(batchKey, {
+        trainingEventId: record.trainingEventId,
         records: [record],
-        batchCreatedAt: record.importBatchCreatedAt,
+        latestUpdatedAt: recordUpdatedAt,
       });
     }
   }
 
   const submittedAttendanceBatchItems: ApprovalItem[] = [];
   for (const entry of attendanceBatchMap.values()) {
-    if (entry.records.length <= 1) {
-      individualSubmittedAttendance.push(entry.records[0]);
-      continue;
-    }
     submittedAttendanceBatchItems.push(mapAttendanceBatchItem(entry.records, "submitted"));
   }
 
   submittedAttendanceBatchItems.sort((a, b) => {
-    const aRecord = a.recordIds?.[0];
-    const bRecord = b.recordIds?.[0];
-    const aRaw = submittedAttendanceRecords.find((record) => record.id === aRecord);
-    const bRaw = submittedAttendanceRecords.find((record) => record.id === bRecord);
-    const aTime = aRaw?.importBatchCreatedAt ? new Date(aRaw.importBatchCreatedAt).getTime() : 0;
-    const bTime = bRaw?.importBatchCreatedAt ? new Date(bRaw.importBatchCreatedAt).getTime() : 0;
+    const aTrainingId = a.recordIds?.[0]
+      ? submittedAttendanceRecords.find((record) => record.id === a.recordIds?.[0])?.trainingEventId
+      : null;
+    const bTrainingId = b.recordIds?.[0]
+      ? submittedAttendanceRecords.find((record) => record.id === b.recordIds?.[0])?.trainingEventId
+      : null;
+    const aTime = aTrainingId ? new Date(attendanceBatchMap.get(aTrainingId)?.latestUpdatedAt ?? 0).getTime() : 0;
+    const bTime = bTrainingId ? new Date(attendanceBatchMap.get(bTrainingId)?.latestUpdatedAt ?? 0).getTime() : 0;
     return bTime - aTime;
   });
 
   const pendingItems: ApprovalItem[] = [
     ...training.submitted.map((event: any) => mapTrainingItem(event, "submitted")),
     ...submittedAttendanceBatchItems,
-    ...individualSubmittedAttendance.map((record: any) => mapAttendanceItem(record, "submitted")),
   ];
 
   const approvedItems: ApprovalItem[] = [
@@ -290,10 +301,29 @@ export default function Approvals() {
   const getActionKey = (item: ApprovalItem, action: "approve" | "return" | "lock" | "reopen") =>
     `${item.type}:${item.id}:${action}`;
 
+  const isActionPending = (actionKey: string) => Boolean(pendingActionKeys[actionKey]);
+
+  const isItemPending = (item: ApprovalItem) =>
+    Object.keys(pendingActionKeys).some((key) => pendingActionKeys[key] && key.startsWith(`${item.type}:${item.id}:`));
+
+  const setActionPending = (actionKey: string, isPending: boolean) => {
+    setPendingActionKeys((prev) => {
+      if (isPending) {
+        return { ...prev, [actionKey]: true };
+      }
+
+      const next = { ...prev };
+      delete next[actionKey];
+      return next;
+    });
+  };
+
   const handleApprove = async (item: ApprovalItem) => {
     const actionKey = getActionKey(item, "approve");
+    if (isActionPending(actionKey)) return;
+
     try {
-      setPendingActionKey(actionKey);
+      setActionPending(actionKey, true);
       if (item.type === "training") {
         await apiRequest("POST", `/api/training-events/${item.id}/approve`);
       } else if (item.type === "attendance_batch") {
@@ -305,17 +335,26 @@ export default function Approvals() {
       } else {
         await apiRequest("POST", `/api/attendance/${item.id}/approve`);
       }
-      queryClient.invalidateQueries({ queryKey: ["/api/approvals"] });
+      await queryClient.invalidateQueries({ queryKey: ["/api/approvals"] });
+    } catch (error) {
+      await queryClient.invalidateQueries({ queryKey: ["/api/approvals"] });
+      toast({
+        variant: "destructive",
+        title: "Failed to approve item",
+        description: parseApiError(error),
+      });
     } finally {
-      setPendingActionKey(null);
+      setActionPending(actionKey, false);
     }
   };
 
   const handleReturn = async (item: ApprovalItem, notes: string) => {
     if (!notes.trim()) return;
     const actionKey = getActionKey(item, "return");
+    if (isActionPending(actionKey)) return;
+
     try {
-      setPendingActionKey(actionKey);
+      setActionPending(actionKey, true);
       if (item.type === "training") {
         await apiRequest("POST", `/api/training-events/${item.id}/return`, { notes: notes.trim() });
       } else if (item.type === "attendance_batch") {
@@ -327,153 +366,225 @@ export default function Approvals() {
       } else {
         await apiRequest("POST", `/api/attendance/${item.id}/return`, { notes: notes.trim() });
       }
-      queryClient.invalidateQueries({ queryKey: ["/api/approvals"] });
+      await queryClient.invalidateQueries({ queryKey: ["/api/approvals"] });
+    } catch (error) {
+      await queryClient.invalidateQueries({ queryKey: ["/api/approvals"] });
+      toast({
+        variant: "destructive",
+        title: "Failed to return item",
+        description: parseApiError(error),
+      });
     } finally {
-      setPendingActionKey(null);
+      setActionPending(actionKey, false);
     }
   };
 
   const handleLock = async (item: ApprovalItem) => {
-    if (item.type === "training") {
-      await apiRequest("POST", `/api/training-events/${item.id}/lock`);
-    } else {
-      await apiRequest("POST", `/api/attendance/${item.id}/lock`);
+    const actionKey = getActionKey(item, "lock");
+    if (isActionPending(actionKey)) return;
+
+    try {
+      setActionPending(actionKey, true);
+      if (item.type === "training") {
+        await apiRequest("POST", `/api/training-events/${item.id}/lock`);
+      } else {
+        await apiRequest("POST", `/api/attendance/${item.id}/lock`);
+      }
+      await queryClient.invalidateQueries({ queryKey: ["/api/approvals"] });
+    } catch (error) {
+      await queryClient.invalidateQueries({ queryKey: ["/api/approvals"] });
+      toast({
+        variant: "destructive",
+        title: "Failed to lock item",
+        description: parseApiError(error),
+      });
+    } finally {
+      setActionPending(actionKey, false);
     }
-    queryClient.invalidateQueries({ queryKey: ["/api/approvals"] });
   };
 
   const handleReopen = async (item: ApprovalItem) => {
-    if (item.type === "training") {
-      await apiRequest("POST", `/api/training-events/${item.id}/reopen`);
-    } else {
-      await apiRequest("POST", `/api/attendance/${item.id}/reopen`);
+    const actionKey = getActionKey(item, "reopen");
+    if (isActionPending(actionKey)) return;
+
+    try {
+      setActionPending(actionKey, true);
+      if (item.type === "training") {
+        await apiRequest("POST", `/api/training-events/${item.id}/reopen`);
+      } else {
+        await apiRequest("POST", `/api/attendance/${item.id}/reopen`);
+      }
+      await queryClient.invalidateQueries({ queryKey: ["/api/approvals"] });
+    } catch (error) {
+      await queryClient.invalidateQueries({ queryKey: ["/api/approvals"] });
+      toast({
+        variant: "destructive",
+        title: "Failed to reopen item",
+        description: parseApiError(error),
+      });
+    } finally {
+      setActionPending(actionKey, false);
     }
-    queryClient.invalidateQueries({ queryKey: ["/api/approvals"] });
   };
 
-  const renderItemCard = (item: ApprovalItem) => (
-    <Card key={`${item.type}-${item.id}`} className="border-border/60">
-      <CardHeader className="pb-3">
-        <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
-          <div className="space-y-1">
-            <CardTitle className="text-lg">{item.title}</CardTitle>
-            <CardDescription>{item.subtitle}</CardDescription>
-          </div>
-          <div className="flex items-center gap-2">
-            <Badge variant="outline" className={typeBadgeClassByType[item.type]}>
-              {item.type === "training"
-                ? "Training"
-                : item.type === "attendance_batch"
-                  ? "Attendance Batch"
-                  : "Attendance"}
-            </Badge>
-            <Badge variant="outline" className={stateBadgeClassByState[item.state]}>
-              {formatStateLabel(item.state)}
-            </Badge>
-          </div>
-        </div>
-      </CardHeader>
-      <CardContent className="space-y-4">
-        <div className="rounded-md border bg-muted/20 p-3 text-sm text-muted-foreground">
-          <div className="flex items-center gap-2 font-medium text-foreground">
-            <FileText className="h-4 w-4" />
-            Review purpose
-          </div>
-          <p className="mt-1">{item.purpose}</p>
-        </div>
+  const renderItemCard = (item: ApprovalItem) => {
+    const approveActionKey = getActionKey(item, "approve");
+    const returnActionKey = getActionKey(item, "return");
+    const lockActionKey = getActionKey(item, "lock");
+    const reopenActionKey = getActionKey(item, "reopen");
+    const itemPending = isItemPending(item);
 
-        <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-4">
-          {item.fields.map((field) => (
-            <div key={field.label} className="rounded-md border bg-background p-3">
-              <div className="text-xs text-muted-foreground">{field.label}</div>
-              <div className="mt-1 text-sm font-medium break-words">{field.value}</div>
+    return (
+      <Card key={`${item.type}-${item.id}`} className="border-border/60">
+        <CardHeader className="pb-3">
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+            <div className="space-y-1">
+              <CardTitle className="text-lg">{item.title}</CardTitle>
+              <CardDescription>{item.subtitle}</CardDescription>
             </div>
-          ))}
-        </div>
+            <div className="flex items-center gap-2">
+              <Badge variant="outline" className={typeBadgeClassByType[item.type]}>
+                {item.type === "training"
+                  ? "Training"
+                  : item.type === "attendance_batch"
+                    ? "Attendance Batch"
+                    : "Attendance"}
+              </Badge>
+              <Badge variant="outline" className={stateBadgeClassByState[item.state]}>
+                {formatStateLabel(item.state)}
+              </Badge>
+            </div>
+          </div>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="rounded-md border bg-muted/20 p-3 text-sm text-muted-foreground">
+            <div className="flex items-center gap-2 font-medium text-foreground">
+              <FileText className="h-4 w-4" />
+              Review purpose
+            </div>
+            <p className="mt-1">{item.purpose}</p>
+          </div>
 
-        {item.type === "attendance_batch" && item.participants && item.participants.length > 0 ? (
-          <div className="space-y-2 rounded-md border bg-background p-3">
-            <div className="text-sm font-medium">Participants in this batch</div>
-            <div className="max-h-64 overflow-y-auto rounded-md border">
-              <div className="grid grid-cols-5 gap-2 border-b bg-muted/30 px-3 py-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                <span>Email</span>
-                <span className="col-span-2">Name</span>
-                <span>Status</span>
-                <span>Hours</span>
+          <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-4">
+            {item.fields.map((field) => (
+              <div key={field.label} className="rounded-md border bg-background p-3">
+                <div className="text-xs text-muted-foreground">{field.label}</div>
+                <div className="mt-1 text-sm font-medium break-words">{field.value}</div>
               </div>
-              {item.participants.map((participant) => (
-                <div
-                  key={participant.id}
-                  className="grid grid-cols-5 gap-2 border-b px-3 py-2 text-sm last:border-b-0"
-                >
-                  <span>{participant.email}</span>
-                  <span className="col-span-2">{participant.fullName}</span>
-                  <span>{participant.attendanceStatus}</span>
-                  <span>{participant.hoursCredited}</span>
+            ))}
+          </div>
+
+          {item.type === "attendance_batch" && item.participants && item.participants.length > 0 ? (
+            <div className="space-y-2 rounded-md border bg-background p-3">
+              <div className="text-sm font-medium">Participants in this batch</div>
+              <div className="max-h-64 overflow-y-auto rounded-md border">
+                <div className="grid grid-cols-5 gap-2 border-b bg-muted/30 px-3 py-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                  <span>Email</span>
+                  <span className="col-span-2">Name</span>
+                  <span>Status</span>
+                  <span>Hours</span>
                 </div>
-              ))}
+                {item.participants.map((participant) => (
+                  <div
+                    key={participant.id}
+                    className="grid grid-cols-5 gap-2 border-b px-3 py-2 text-sm last:border-b-0"
+                  >
+                    <span>{participant.email}</span>
+                    <span className="col-span-2">{participant.fullName}</span>
+                    <span>{participant.attendanceStatus}</span>
+                    <span>{participant.hoursCredited}</span>
+                  </div>
+                ))}
+              </div>
             </div>
-          </div>
-        ) : null}
+          ) : null}
 
-        {item.returnNotes ? (
-          <div className="rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
-            <span className="font-semibold">Return notes:</span> {item.returnNotes}
-          </div>
-        ) : null}
+          {item.returnNotes ? (
+            <div className="rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
+              <span className="font-semibold">Return notes:</span> {item.returnNotes}
+            </div>
+          ) : null}
 
-        <div className="flex justify-end gap-2">
-          {item.state === "submitted" ? (
-            <>
-              <Button
-                variant="outline"
-                className="text-destructive hover:text-destructive hover:bg-destructive/10"
-                disabled={pendingActionKey === getActionKey(item, "return")}
-                onClick={() => {
-                  setReturnDialogItem(item);
-                  setReturnNotes(item.returnNotes || "");
-                }}
-              >
-                <XCircle className="mr-2 h-4 w-4" />
-                Return
-              </Button>
-              <Button
-                className="bg-emerald-600 hover:bg-emerald-700"
-                disabled={pendingActionKey === getActionKey(item, "approve")}
-                onClick={() => handleApprove(item)}
-              >
-                {pendingActionKey === getActionKey(item, "approve") ? (
+          <div className="flex justify-end gap-2">
+            {item.state === "submitted" ? (
+              <>
+                <Button
+                  variant="outline"
+                  className="text-destructive hover:text-destructive hover:bg-destructive/10"
+                  disabled={itemPending}
+                  onClick={() => {
+                    setReturnDialogItem(item);
+                    setReturnNotes(item.returnNotes || "");
+                  }}
+                >
+                  {isActionPending(returnActionKey) ? (
+                    <>
+                      <Spinner className="mr-2 h-4 w-4" />
+                      Returning...
+                    </>
+                  ) : (
+                    <>
+                      <XCircle className="mr-2 h-4 w-4" />
+                      Return
+                    </>
+                  )}
+                </Button>
+                <Button
+                  className="bg-emerald-600 hover:bg-emerald-700"
+                  disabled={itemPending}
+                  onClick={() => handleApprove(item)}
+                >
+                  {isActionPending(approveActionKey) ? (
+                    <>
+                      <Spinner className="mr-2 h-4 w-4" />
+                      Approving...
+                    </>
+                  ) : (
+                    <>
+                      <CheckCircle2 className="mr-2 h-4 w-4" />
+                      Approve
+                    </>
+                  )}
+                </Button>
+              </>
+            ) : null}
+
+            {item.state === "approved" ? (
+              <Button variant="outline" disabled={itemPending} onClick={() => handleLock(item)}>
+                {isActionPending(lockActionKey) ? (
                   <>
                     <Spinner className="mr-2 h-4 w-4" />
-                    Approving...
+                    Locking...
                   </>
                 ) : (
                   <>
-                    <CheckCircle2 className="mr-2 h-4 w-4" />
-                    Approve
+                    <Lock className="mr-2 h-4 w-4" />
+                    Lock
                   </>
                 )}
               </Button>
-            </>
-          ) : null}
+            ) : null}
 
-          {item.state === "approved" ? (
-            <Button variant="outline" onClick={() => handleLock(item)}>
-              <Lock className="mr-2 h-4 w-4" />
-              Lock
-            </Button>
-          ) : null}
-
-          {item.state === "locked" ? (
-            <Button variant="outline" onClick={() => handleReopen(item)}>
-              <RotateCcw className="mr-2 h-4 w-4" />
-              Reopen
-            </Button>
-          ) : null}
-        </div>
-      </CardContent>
-    </Card>
-  );
+            {item.state === "locked" ? (
+              <Button variant="outline" disabled={itemPending} onClick={() => handleReopen(item)}>
+                {isActionPending(reopenActionKey) ? (
+                  <>
+                    <Spinner className="mr-2 h-4 w-4" />
+                    Reopening...
+                  </>
+                ) : (
+                  <>
+                    <RotateCcw className="mr-2 h-4 w-4" />
+                    Reopen
+                  </>
+                )}
+              </Button>
+            ) : null}
+          </div>
+        </CardContent>
+      </Card>
+    );
+  };
 
   return (
     <div className="space-y-6">
@@ -547,7 +658,7 @@ export default function Approvals() {
                 !returnNotes.trim() ||
                 !returnDialogItem ||
                 (returnDialogItem
-                  ? pendingActionKey === getActionKey(returnDialogItem, "return")
+                  ? isItemPending(returnDialogItem)
                   : false)
               }
               onClick={async () => {
@@ -557,7 +668,7 @@ export default function Approvals() {
                 setReturnNotes("");
               }}
             >
-              {returnDialogItem && pendingActionKey === getActionKey(returnDialogItem, "return") ? (
+              {returnDialogItem && isActionPending(getActionKey(returnDialogItem, "return")) ? (
                 <>
                   <Spinner className="mr-2 h-4 w-4" />
                   Sending...
