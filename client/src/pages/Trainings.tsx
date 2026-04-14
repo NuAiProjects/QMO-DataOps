@@ -97,6 +97,12 @@ const formatCategoryLabel = (value: unknown): string => {
   return normalized;
 };
 
+const getEventProviderLabel = (event: any) => {
+  const provider = typeof event?.provider === "string" ? event.provider.trim() : "";
+  if (provider) return provider;
+  return normalizeCategory(event?.category) === "internal" ? "Internal" : "-";
+};
+
 const formatWorkflowLabel = (value: unknown) => {
   if (typeof value !== "string" || value.trim().length === 0) return "Unknown";
   return value
@@ -188,6 +194,7 @@ export default function Trainings() {
   const { toast } = useToast();
   const [statusFilter, setStatusFilter] = useState("All");
   const [categoryFilter, setCategoryFilter] = useState("All Types");
+  const [providerFilter, setProviderFilter] = useState("All Providers");
   const [isDialogOpen, setIsDialogOpen] = useState(false);
   const [editingEventId, setEditingEventId] = useState<string | null>(null);
   const [detailsEvent, setDetailsEvent] = useState<any | null>(null);
@@ -240,6 +247,38 @@ export default function Trainings() {
     if (internalProviderOptions.includes(form.provider)) return internalProviderOptions;
     return [form.provider, ...internalProviderOptions];
   }, [internalProviderOptions, form.provider]);
+  const providerFilterOptions = useMemo(() => {
+    const names = new Set<string>();
+
+    for (const event of events) {
+      const matchesStatus =
+        statusFilter === "All"
+          ? true
+          : statusFilter === "Drafts"
+            ? event.workflowStatus === "draft"
+            : statusFilter === "Submitted"
+              ? event.workflowStatus === "submitted"
+              : statusFilter === "Approved"
+                ? event.workflowStatus === "approved"
+                : statusFilter === "Locked"
+                  ? event.workflowStatus === "locked"
+                  : true;
+
+      const normalizedCategory = normalizeCategory(event.category);
+      const matchesCategory =
+        categoryFilter === "All Types"
+          ? true
+          : categoryFilter === "Internal"
+            ? normalizedCategory === "internal"
+            : normalizedCategory === "external";
+
+      if (!matchesStatus || !matchesCategory) continue;
+
+      names.add(getEventProviderLabel(event));
+    }
+
+    return Array.from(names).sort((a, b) => a.localeCompare(b));
+  }, [events, statusFilter, categoryFilter]);
   const filtered = useMemo(() => {
     return events
       .filter((event: any) => {
@@ -263,8 +302,10 @@ export default function Trainings() {
             : categoryFilter === "Internal"
               ? normalizedCategory === "internal"
               : normalizedCategory === "external";
+        const matchesProvider =
+          providerFilter === "All Providers" ? true : getEventProviderLabel(event) === providerFilter;
 
-        return matchesStatus && matchesCategory;
+        return matchesStatus && matchesCategory && matchesProvider;
       })
       .sort((a: any, b: any) => {
         if (recentEventId) {
@@ -273,15 +314,14 @@ export default function Trainings() {
         }
         return getEventSortTime(b) - getEventSortTime(a);
       });
-  }, [events, statusFilter, categoryFilter, recentEventId]);
+  }, [events, statusFilter, categoryFilter, providerFilter, recentEventId]);
   const isPageLoading = trainingsLoading || unitsLoading || employeesLoading;
 
   const handleExportTrainings = () => {
     const csvRows = filtered.map((event: any) => ({
       title: event.title || "",
       category: formatCategoryLabel(event.category) || "",
-      provider:
-        event.provider || (normalizeCategory(event.category) === "internal" ? "Internal" : ""),
+      provider: getEventProviderLabel(event),
       venue: event.venue || "",
       startDate: event.startDate || "",
       endDate: event.endDate || "",
@@ -294,9 +334,13 @@ export default function Trainings() {
       description: event.description || "",
     }));
 
+    const providerSegment =
+      providerFilter === "All Providers"
+        ? "all-providers"
+        : providerFilter.toLowerCase().replace(/[^a-z0-9]+/g, "-");
     const fileName = `training-events-${statusFilter.toLowerCase().replace(/\s+/g, "-")}-${categoryFilter
       .toLowerCase()
-      .replace(/\s+/g, "-")}.csv`;
+      .replace(/\s+/g, "-")}-${providerSegment}.csv`;
     downloadCsvFile(fileName, rowsToCsv(csvRows));
   };
 
@@ -326,6 +370,12 @@ export default function Trainings() {
     }, 5000);
     return () => window.clearTimeout(timer);
   }, [recentEventId]);
+
+  useEffect(() => {
+    if (providerFilter === "All Providers") return;
+    if (providerFilterOptions.includes(providerFilter)) return;
+    setProviderFilter("All Providers");
+  }, [providerFilter, providerFilterOptions]);
 
   const resetForm = () => {
     setForm(emptyForm);
@@ -701,18 +751,41 @@ export default function Trainings() {
               </Button>
             ))}
           </div>
-          <div className="flex items-center gap-2 overflow-x-auto pb-2">
-            {["All Types", "Internal", "External"].map((value) => (
-              <Button
-                key={value}
-                variant={categoryFilter === value ? "default" : "outline"}
-                onClick={() => setCategoryFilter(value)}
-                className="rounded-full"
-                size="sm"
-              >
-                {value}
-              </Button>
-            ))}
+          <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center">
+            <div className="flex items-center gap-2 overflow-x-auto pb-2 sm:pb-0">
+              {["All Types", "Internal", "External"].map((value) => (
+                <Button
+                  key={value}
+                  variant={categoryFilter === value ? "default" : "outline"}
+                  onClick={() => setCategoryFilter(value)}
+                  className="rounded-full"
+                  size="sm"
+                >
+                  {value}
+                </Button>
+              ))}
+            </div>
+            <div className="w-full sm:w-[260px]">
+              <Select value={providerFilter} onValueChange={setProviderFilter}>
+                <SelectTrigger>
+                  <SelectValue placeholder="All Providers" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="All Providers">All Providers</SelectItem>
+                  {providerFilterOptions.length > 0 ? (
+                    providerFilterOptions.map((providerName) => (
+                      <SelectItem key={providerName} value={providerName}>
+                        {providerName}
+                      </SelectItem>
+                    ))
+                  ) : (
+                    <SelectItem value="__no_providers__" disabled>
+                      No providers available
+                    </SelectItem>
+                  )}
+                </SelectContent>
+              </Select>
+            </div>
           </div>
         </div>
         <div className="inline-flex items-center gap-1 self-start rounded-full border border-border/70 bg-background p-1 shadow-sm">
@@ -834,7 +907,7 @@ export default function Trainings() {
                     </div>
                     <div className="flex items-center">
                       <Users className="mr-2 h-3.5 w-3.5" />
-                      {event.provider || (normalizeCategory(event.category) === "internal" ? "Internal" : "-")}
+                      {getEventProviderLabel(event)}
                     </div>
                   </div>
                 </CardContent>
@@ -983,8 +1056,7 @@ export default function Trainings() {
                 </div>
                 <div>
                   <span className="font-medium">Provider:</span>{" "}
-                  {detailsEvent.provider ||
-                    (normalizeCategory(detailsEvent.category) === "internal" ? "Internal" : "-")}
+                  {getEventProviderLabel(detailsEvent)}
                 </div>
                 <div>
                   <span className="font-medium">Venue:</span> {detailsEvent.venue || "-"}
