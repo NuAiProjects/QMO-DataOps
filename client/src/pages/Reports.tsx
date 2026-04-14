@@ -310,7 +310,7 @@ function buildTrainingAnalyticsExportCsv(data: TrainingAnalyticsResponse) {
       })),
     },
     {
-      title: "Training Hours by Owning Unit",
+      title: "Training Hours by Provider",
       rows: data.ownerUnits.map((row) => ({
         unitId: row.unitId,
         unitName: row.unitName,
@@ -390,10 +390,10 @@ export default function Reports() {
 
   const deliveryModeData = analytics?.deliveryModes ?? [];
   const topTrainingData = analytics?.topTrainings ?? [];
-  const ownerUnitData = analytics?.ownerUnits ?? [];
+  const providerUnitData = analytics?.ownerUnits ?? [];
   const trainingsProvidedByUnitRows = useMemo<TrainingsProvidedByUnitRow[]>(() => {
     if (!analytics) return [];
-    return ownerUnitData.map((row) => ({
+    return providerUnitData.map((row) => ({
       unitId: row.unitId,
       unitName: row.unitName,
       trainingsProvided: row.trainingCount,
@@ -406,7 +406,7 @@ export default function Reports() {
           ? 0
           : roundToForReport((row.trainingCount / analytics.summary.totalTrainings) * 100, 1),
     }));
-  }, [analytics, ownerUnitData]);
+  }, [analytics, providerUnitData]);
   const selectedUnitName = units.find((unit: any) => unit.id === filters.unitId)?.name;
   const scopeLabel = selectedUnitName || "all scoped units";
 
@@ -524,7 +524,9 @@ export default function Reports() {
       <Card className="border-border/60">
         <CardHeader>
           <CardTitle>Report Filters</CardTitle>
-          <CardDescription>Apply filters to all reports below.</CardDescription>
+          <CardDescription>
+            Apply date filters and optionally scope reports by the unit that provided the training.
+          </CardDescription>
         </CardHeader>
         <CardContent className="grid gap-4 md:grid-cols-3">
           <div className="space-y-2">
@@ -544,7 +546,7 @@ export default function Reports() {
             />
           </div>
           <div className="space-y-2">
-            <label className="text-sm font-medium">Unit Scope</label>
+            <label className="text-sm font-medium">Provider Unit Scope</label>
             <Select
               value={filters.unitId || "all"}
               onValueChange={(value) =>
@@ -714,16 +716,18 @@ export default function Reports() {
 
           <Card className="relative z-0 overflow-visible border-border/60">
             <CardHeader>
-              <CardTitle>Training Hours by Owning Unit</CardTitle>
-              <CardDescription>Approved and locked credited hours grouped by training owner.</CardDescription>
+              <CardTitle>Training Hours by Provider</CardTitle>
+              <CardDescription>
+                Approved and locked credited hours grouped by the unit listed as the training provider.
+              </CardDescription>
             </CardHeader>
             <CardContent>
-              {ownerUnitData.length > 0 ? (
+              {providerUnitData.length > 0 ? (
                 <ChartContainer
                   config={ownerHoursChartConfig}
                   className="h-[260px] w-full aspect-auto overflow-visible"
                 >
-                  <BarChart accessibilityLayer data={ownerUnitData} margin={{ left: 8, right: 12 }}>
+                  <BarChart accessibilityLayer data={providerUnitData} margin={{ left: 8, right: 12 }}>
                     <CartesianGrid vertical={false} />
                     <XAxis
                       dataKey="unitName"
@@ -792,9 +796,9 @@ export default function Reports() {
         <Card className="border-border/60">
           <CardHeader className="flex flex-row items-center justify-between gap-3">
             <div>
-              <CardTitle>Trainings Provided by Unit</CardTitle>
+              <CardTitle>Trainings Provided by Provider</CardTitle>
               <CardDescription>
-                Unit-level report of trainings provided within the current scope.
+                Counts trainings by the provider/hosting unit shown on each training card, not by the attendee's home unit.
               </CardDescription>
             </div>
             <Button
@@ -810,7 +814,7 @@ export default function Reports() {
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead>Unit</TableHead>
+                  <TableHead>Provider</TableHead>
                   <TableHead>Trainings Provided</TableHead>
                   <TableHead>Participants</TableHead>
                   <TableHead>Total Credited Hours</TableHead>
@@ -919,8 +923,10 @@ export default function Reports() {
       <Card className="border-border/60">
         <CardHeader className="flex flex-row items-center justify-between">
           <div>
-            <CardTitle>Hours by Unit</CardTitle>
-            <CardDescription>Aggregated training hours by unit and department.</CardDescription>
+            <CardTitle>Hours by Employee Unit</CardTitle>
+            <CardDescription>
+              Aggregated credited hours based on the attendee's home unit and department.
+            </CardDescription>
           </div>
           <Button variant="outline" onClick={() => handleExport("/api/reports/hours-by-unit")}>
             <Download className="mr-2 h-4 w-4" />

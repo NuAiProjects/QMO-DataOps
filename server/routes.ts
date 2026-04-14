@@ -565,6 +565,12 @@ const reportQuerySchema = z.object({
 });
 const REPORT_PAGE_SIZE = 20;
 
+type ReportProviderScope = {
+  unitIds: string[];
+  unitIdSet: Set<string>;
+  providerLabels: Set<string>;
+};
+
 const dashboardActivityQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(50).optional(),
 });
@@ -578,6 +584,78 @@ function toIsoTimestamp(value: Date | string | null | undefined) {
   const date = value instanceof Date ? value : new Date(value);
   if (Number.isNaN(date.getTime())) return new Date(0).toISOString();
   return date.toISOString();
+}
+
+function normalizeProviderLabel(value: string | null | undefined) {
+  return value?.trim().replace(/\s+/g, " ").toLocaleLowerCase() ?? "";
+}
+
+async function getReportProviderScope(
+  unitId: string | undefined,
+  includeChildren: string | undefined,
+  scopeUnitIds: string[],
+) {
+  if (!unitId) {
+    return null;
+  }
+
+  const providerUnitIds =
+    includeChildren !== "false"
+      ? await getDescendantUnits(unitId, scopeUnitIds)
+      : [unitId];
+
+  const providerUnitRows =
+    providerUnitIds.length === 0
+      ? []
+      : await db
+          .select({ id: units.id, name: units.name })
+          .from(units)
+          .where(inArray(units.id, providerUnitIds));
+
+  return {
+    unitIds: providerUnitIds,
+    unitIdSet: new Set(providerUnitIds),
+    providerLabels: new Set(
+      providerUnitRows
+        .map((row) => normalizeProviderLabel(row.name))
+        .filter((value) => value.length > 0),
+    ),
+  } satisfies ReportProviderScope;
+}
+
+function isTrainingProvidedByScope(
+  training: { provider: string | null; ownerUnitId: string },
+  providerScope: ReportProviderScope | null,
+) {
+  if (!providerScope) {
+    return true;
+  }
+
+  const providerLabel = normalizeProviderLabel(training.provider);
+  if (providerLabel) {
+    return providerScope.providerLabels.has(providerLabel);
+  }
+
+  return providerScope.unitIdSet.has(training.ownerUnitId);
+}
+
+async function getProviderScopedTrainingIds(providerScope: ReportProviderScope | null) {
+  if (!providerScope) {
+    return null;
+  }
+
+  const trainingRows = await db
+    .select({
+      id: trainingEvents.id,
+      provider: trainingEvents.provider,
+      ownerUnitId: trainingEvents.ownerUnitId,
+    })
+    .from(trainingEvents)
+    .where(trainingEventNotDeletedCondition());
+
+  return trainingRows
+    .filter((row) => isTrainingProvidedByScope(row, providerScope))
+    .map((row) => row.id);
 }
 
 function buildPathWithQuery(
@@ -3624,24 +3702,40 @@ export async function registerRoutes(
         },
       });
     }
-    let allowedUnits = scopeUnitIds;
     if (parsed.data.unitId) {
       if (!scopeUnitIds.includes(parsed.data.unitId)) {
         return res.status(403).json({ message: "Unit out of scope." });
       }
-      const includeDescendants = parsed.data.includeChildren !== "false";
-      allowedUnits =
-        includeDescendants
-          ? await getDescendantUnits(parsed.data.unitId, scopeUnitIds)
-          : [parsed.data.unitId];
+    }
+
+    const providerScope = await getReportProviderScope(
+      parsed.data.unitId,
+      parsed.data.includeChildren,
+      scopeUnitIds,
+    );
+    const providerScopedTrainingIds = await getProviderScopedTrainingIds(providerScope);
+    if (providerScopedTrainingIds && providerScopedTrainingIds.length === 0) {
+      return res.json({
+        rows: [],
+        pagination: {
+          page: requestedPage,
+          pageSize: REPORT_PAGE_SIZE,
+          total: 0,
+          totalPages: 1,
+        },
+      });
     }
 
     const filters = [
-      inArray(employees.unitId, allowedUnits),
+      inArray(employees.unitId, scopeUnitIds),
       employeeNotDeletedCondition(),
       inArray(attendanceRecords.workflowStatus, ["approved", "locked"]),
       attendanceNotDeletedCondition(),
+      trainingEventNotDeletedCondition(),
     ];
+    if (providerScopedTrainingIds) {
+      filters.push(inArray(attendanceRecords.trainingEventId, providerScopedTrainingIds));
+    }
     if (parsed.data.from) {
       filters.push(gte(attendanceRecords.attendanceDate, parsed.data.from));
     }
@@ -3659,6 +3753,7 @@ export async function registerRoutes(
       })
       .from(attendanceRecords)
       .innerJoin(employees, eq(attendanceRecords.employeeId, employees.id))
+      .innerJoin(trainingEvents, eq(attendanceRecords.trainingEventId, trainingEvents.id))
       .where(and(...filters))
       .groupBy(employees.id, employees.employeeNo, employees.fullName, employees.unitId)
       .orderBy(asc(employees.fullName));
@@ -3699,17 +3794,18 @@ export async function registerRoutes(
       return res.send("message\nNo scoped employee data available.");
     }
 
-    let allowedUnits = scopeUnitIds;
     if (parsedQuery.data.unitId) {
       if (!scopeUnitIds.includes(parsedQuery.data.unitId)) {
         return res.status(403).json({ message: "Unit out of scope." });
       }
-      const includeDescendants = parsedQuery.data.includeChildren !== "false";
-      allowedUnits =
-        includeDescendants
-          ? await getDescendantUnits(parsedQuery.data.unitId, scopeUnitIds)
-          : [parsedQuery.data.unitId];
     }
+
+    const providerScope = await getReportProviderScope(
+      parsedQuery.data.unitId,
+      parsedQuery.data.includeChildren,
+      scopeUnitIds,
+    );
+    const providerScopedTrainingIds = await getProviderScopedTrainingIds(providerScope);
 
     const [employeeRow] = await db
       .select({
@@ -3732,7 +3828,7 @@ export async function registerRoutes(
       return res.status(404).json({ message: "Employee not found." });
     }
 
-    if (!allowedUnits.includes(employeeRow.unitId)) {
+    if (!scopeUnitIds.includes(employeeRow.unitId)) {
       return res.status(403).json({ message: "Employee out of scope." });
     }
 
@@ -3742,6 +3838,27 @@ export async function registerRoutes(
       attendanceNotDeletedCondition(),
       trainingEventNotDeletedCondition(),
     ];
+    if (providerScopedTrainingIds) {
+      if (providerScopedTrainingIds.length === 0) {
+        const csvRows: Array<Record<string, unknown>> = [
+          {
+            employeeNo: employeeRow.employeeNo,
+            employeeName: employeeRow.fullName,
+            employeeEmail: employeeRow.email ?? "",
+            message: "No approved or locked training data for the selected filters.",
+          },
+        ];
+        const safeEmployeeName = employeeRow.fullName.replace(/[^a-zA-Z0-9._-]+/g, "_");
+        const csv = toCsv(csvRows);
+        res.setHeader("Content-Type", "text/csv");
+        res.setHeader(
+          "Content-Disposition",
+          `attachment; filename="${safeEmployeeName || employeeRow.id}-training-data.csv"`,
+        );
+        return res.send(csv);
+      }
+      detailFilters.push(inArray(attendanceRecords.trainingEventId, providerScopedTrainingIds));
+    }
     if (parsedQuery.data.from) {
       detailFilters.push(gte(attendanceRecords.attendanceDate, parsedQuery.data.from));
     }
@@ -3828,24 +3945,40 @@ export async function registerRoutes(
         },
       });
     }
-    let allowedUnits = scopeUnitIds;
     if (parsed.data.unitId) {
       if (!scopeUnitIds.includes(parsed.data.unitId)) {
         return res.status(403).json({ message: "Unit out of scope." });
       }
-      const includeDescendants = parsed.data.includeChildren !== "false";
-      allowedUnits =
-        includeDescendants
-          ? await getDescendantUnits(parsed.data.unitId, scopeUnitIds)
-          : [parsed.data.unitId];
+    }
+
+    const providerScope = await getReportProviderScope(
+      parsed.data.unitId,
+      parsed.data.includeChildren,
+      scopeUnitIds,
+    );
+    const providerScopedTrainingIds = await getProviderScopedTrainingIds(providerScope);
+    if (providerScopedTrainingIds && providerScopedTrainingIds.length === 0) {
+      return res.json({
+        rows: [],
+        pagination: {
+          page: requestedPage,
+          pageSize: REPORT_PAGE_SIZE,
+          total: 0,
+          totalPages: 1,
+        },
+      });
     }
 
     const filters = [
-      inArray(employees.unitId, allowedUnits),
+      inArray(employees.unitId, scopeUnitIds),
       employeeNotDeletedCondition(),
       inArray(attendanceRecords.workflowStatus, ["approved", "locked"]),
       attendanceNotDeletedCondition(),
+      trainingEventNotDeletedCondition(),
     ];
+    if (providerScopedTrainingIds) {
+      filters.push(inArray(attendanceRecords.trainingEventId, providerScopedTrainingIds));
+    }
     if (parsed.data.from) {
       filters.push(gte(attendanceRecords.attendanceDate, parsed.data.from));
     }
@@ -3860,13 +3993,14 @@ export async function registerRoutes(
       })
       .from(attendanceRecords)
       .innerJoin(employees, eq(attendanceRecords.employeeId, employees.id))
+      .innerJoin(trainingEvents, eq(attendanceRecords.trainingEventId, trainingEvents.id))
       .where(and(...filters))
       .groupBy(employees.unitId);
 
     const unitRows = await db
       .select({ id: units.id, name: units.name, parentUnitId: units.parentUnitId })
       .from(units)
-      .where(inArray(units.id, allowedUnits));
+      .where(inArray(units.id, scopeUnitIds));
 
     const baseMap = new Map<string, number>();
     for (const row of baseRows) {
@@ -3928,17 +4062,18 @@ export async function registerRoutes(
       return res.send("message\nNo scoped unit data available.");
     }
 
-    let allowedUnits = scopeUnitIds;
     if (parsedQuery.data.unitId) {
       if (!scopeUnitIds.includes(parsedQuery.data.unitId)) {
         return res.status(403).json({ message: "Unit out of scope." });
       }
-      const includeDescendants = parsedQuery.data.includeChildren !== "false";
-      allowedUnits =
-        includeDescendants
-          ? await getDescendantUnits(parsedQuery.data.unitId, scopeUnitIds)
-          : [parsedQuery.data.unitId];
     }
+
+    const providerScope = await getReportProviderScope(
+      parsedQuery.data.unitId,
+      parsedQuery.data.includeChildren,
+      scopeUnitIds,
+    );
+    const providerScopedTrainingIds = await getProviderScopedTrainingIds(providerScope);
 
     const [unitRow] = await db
       .select({
@@ -3953,11 +4088,11 @@ export async function registerRoutes(
       return res.status(404).json({ message: "Unit not found." });
     }
 
-    if (!allowedUnits.includes(unitRow.id)) {
+    if (!scopeUnitIds.includes(unitRow.id)) {
       return res.status(403).json({ message: "Unit out of scope." });
     }
 
-    const scopedUnitIdsForExport = await getDescendantUnits(unitRow.id, allowedUnits);
+    const scopedUnitIdsForExport = await getDescendantUnits(unitRow.id, scopeUnitIds);
 
     const detailFilters = [
       inArray(employees.unitId, scopedUnitIdsForExport),
@@ -3966,6 +4101,24 @@ export async function registerRoutes(
       attendanceNotDeletedCondition(),
       trainingEventNotDeletedCondition(),
     ];
+    if (providerScopedTrainingIds) {
+      if (providerScopedTrainingIds.length === 0) {
+        const csv = toCsv([
+          {
+            unitName: unitRow.name,
+            message: "No approved or locked training data for the selected filters.",
+          },
+        ]);
+        const safeUnitName = unitRow.name.replace(/[^a-zA-Z0-9._-]+/g, "_");
+        res.setHeader("Content-Type", "text/csv");
+        res.setHeader(
+          "Content-Disposition",
+          `attachment; filename="${safeUnitName || unitRow.id}-training-data.csv"`,
+        );
+        return res.send(csv);
+      }
+      detailFilters.push(inArray(attendanceRecords.trainingEventId, providerScopedTrainingIds));
+    }
     if (parsedQuery.data.from) {
       detailFilters.push(gte(attendanceRecords.attendanceDate, parsedQuery.data.from));
     }
@@ -4086,20 +4239,20 @@ export async function registerRoutes(
       return res.json(emptyAnalytics);
     }
 
-    let allowedUnits = scopeUnitIds;
     if (parsed.data.unitId) {
       if (!scopeUnitIds.includes(parsed.data.unitId)) {
         return res.status(403).json({ message: "Unit out of scope." });
       }
-      const includeDescendants = parsed.data.includeChildren !== "false";
-      allowedUnits =
-        includeDescendants
-          ? await getDescendantUnits(parsed.data.unitId, scopeUnitIds)
-          : [parsed.data.unitId];
     }
 
+    const providerScope = await getReportProviderScope(
+      parsed.data.unitId,
+      parsed.data.includeChildren,
+      scopeUnitIds,
+    );
+
     const trainingFilters = [
-      inArray(trainingEvents.ownerUnitId, allowedUnits),
+      inArray(trainingEvents.ownerUnitId, scopeUnitIds),
       trainingEventNotDeletedCondition(),
     ];
     if (parsed.data.from) {
@@ -4109,7 +4262,7 @@ export async function registerRoutes(
       trainingFilters.push(lte(trainingEvents.endDate, parsed.data.to));
     }
 
-    const scopedTrainingRows = await db
+    const accessibleTrainingRows = await db
       .select({
         id: trainingEvents.id,
         title: trainingEvents.title,
@@ -4126,6 +4279,9 @@ export async function registerRoutes(
       .from(trainingEvents)
       .where(and(...trainingFilters))
       .orderBy(asc(trainingEvents.startDate), asc(trainingEvents.title));
+    const scopedTrainingRows = accessibleTrainingRows.filter((row) =>
+      isTrainingProvidedByScope(row, providerScope),
+    );
 
     if (scopedTrainingRows.length === 0) {
       const emptyAnalytics = {
