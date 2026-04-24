@@ -590,6 +590,125 @@ function normalizeProviderLabel(value: string | null | undefined) {
   return value?.trim().replace(/\s+/g, " ").toLocaleLowerCase() ?? "";
 }
 
+function normalizeTrainingCategory(value: string | null | undefined) {
+  return value?.trim().toLocaleLowerCase() === "external" ? "external" : "internal";
+}
+
+type ResolvedTrainingOwnership =
+  | {
+      provider: string | null;
+      ownerUnitId: string;
+    }
+  | {
+      error: {
+        status: number;
+        message: string;
+      };
+    };
+
+async function getUnitNameMap() {
+  const unitRows = await db
+    .select({ id: units.id, name: units.name })
+    .from(units);
+
+  return new Map(
+    unitRows.map((row) => [normalizeProviderLabel(row.name), row] as const),
+  );
+}
+
+async function resolveTrainingOwnerUnit(
+  category: string | null | undefined,
+  provider: string | null | undefined,
+  requestedOwnerUnitId: string | undefined,
+  scopeUnitIds: string[],
+): Promise<ResolvedTrainingOwnership> {
+  const normalizedProvider = normalizeProviderLabel(provider);
+  const normalizedCategory = normalizeTrainingCategory(category);
+
+  if (normalizedProvider.length === 0) {
+    return {
+      error: {
+        status: 400,
+        message:
+          normalizedCategory === "external"
+            ? "External provider is required."
+            : "Select a provider unit.",
+      },
+    } as const;
+  }
+
+  const unitNameMap = await getUnitNameMap();
+  const providerUnit = unitNameMap.get(normalizedProvider);
+
+  if (providerUnit) {
+    if (!scopeUnitIds.includes(providerUnit.id)) {
+      return {
+        error: {
+          status: 403,
+          message: "Provider unit out of scope.",
+        },
+      } as const;
+    }
+
+    return {
+      provider: providerUnit.name,
+      ownerUnitId: providerUnit.id,
+    } as const;
+  }
+
+  if (normalizedCategory !== "external") {
+    return {
+      error: {
+        status: 400,
+        message: "Internal provider must match an existing unit.",
+      },
+    } as const;
+  }
+
+  if (!requestedOwnerUnitId) {
+    return {
+      error: {
+        status: 400,
+        message: "Owner unit is required.",
+      },
+    } as const;
+  }
+
+  if (!scopeUnitIds.includes(requestedOwnerUnitId)) {
+    return {
+      error: {
+        status: 403,
+        message: "Owner unit out of scope.",
+      },
+    } as const;
+  }
+
+  return {
+    provider: provider?.trim() || null,
+    ownerUnitId: requestedOwnerUnitId,
+  } as const;
+}
+
+async function buildProviderScope(unitIds: string[]) {
+  const providerUnitRows =
+    unitIds.length === 0
+      ? []
+      : await db
+          .select({ id: units.id, name: units.name })
+          .from(units)
+          .where(inArray(units.id, unitIds));
+
+  return {
+    unitIds,
+    unitIdSet: new Set(unitIds),
+    providerLabels: new Set(
+      providerUnitRows
+        .map((row) => normalizeProviderLabel(row.name))
+        .filter((value) => value.length > 0),
+    ),
+  } satisfies ReportProviderScope;
+}
+
 async function getReportProviderScope(
   unitId: string | undefined,
   includeChildren: string | undefined,
@@ -604,23 +723,7 @@ async function getReportProviderScope(
       ? await getDescendantUnits(unitId, scopeUnitIds)
       : [unitId];
 
-  const providerUnitRows =
-    providerUnitIds.length === 0
-      ? []
-      : await db
-          .select({ id: units.id, name: units.name })
-          .from(units)
-          .where(inArray(units.id, providerUnitIds));
-
-  return {
-    unitIds: providerUnitIds,
-    unitIdSet: new Set(providerUnitIds),
-    providerLabels: new Set(
-      providerUnitRows
-        .map((row) => normalizeProviderLabel(row.name))
-        .filter((value) => value.length > 0),
-    ),
-  } satisfies ReportProviderScope;
+  return buildProviderScope(providerUnitIds);
 }
 
 function isTrainingProvidedByScope(
@@ -1721,6 +1824,7 @@ export async function registerRoutes(
           ? await getDescendantUnits(unitId, scopeUnitIds)
           : [unitId];
     }
+    const providerScope = await buildProviderScope(allowedUnits);
     const filters = [trainingEventNotDeletedCondition()];
     if (status) {
       filters.push(eq(trainingEvents.workflowStatus, status));
@@ -1732,7 +1836,8 @@ export async function registerRoutes(
       .orderBy(desc(trainingEvents.startDate));
     const parentMap = await getUnitParentMap();
     const scopedRows = rows.filter((row) =>
-      isTrainingEventVisibleToScope(row, allowedUnits, parentMap),
+      isTrainingEventVisibleToScope(row, allowedUnits, parentMap) ||
+      isTrainingProvidedByScope(row, providerScope),
     );
     res.json({ trainingEvents: scopedRows });
   });
@@ -1746,18 +1851,29 @@ export async function registerRoutes(
         return res.status(400).json({ message: parsed.error.flatten() });
       }
       const scopeUnitIds = await getScopedUnitIds(req.user!);
-      if (!scopeUnitIds.includes(parsed.data.ownerUnitId)) {
-        return res.status(403).json({ message: "Unit out of scope." });
-      }
       if (isStartDateAfterEndDate(parsed.data.startDate, parsed.data.endDate)) {
         return res.status(400).json({
           message: "Start date must be on or before end date.",
         });
       }
+      const resolvedOwnership = await resolveTrainingOwnerUnit(
+        parsed.data.category,
+        parsed.data.provider,
+        parsed.data.ownerUnitId,
+        scopeUnitIds,
+      );
+      if ("error" in resolvedOwnership) {
+        const { error } = resolvedOwnership;
+        return res
+          .status(error.status)
+          .json({ message: error.message });
+      }
       const [created] = await db
         .insert(trainingEvents)
         .values({
           ...parsed.data,
+          provider: resolvedOwnership.provider,
+          ownerUnitId: resolvedOwnership.ownerUnitId,
           hours: parsed.data.hours.toString(),
           visibilityScope: parsed.data.visibilityScope ?? "unit",
           isMandatory: parsed.data.isMandatory ?? false,
@@ -1798,24 +1914,38 @@ export async function registerRoutes(
       if (!scopeUnitIds.includes(existing.ownerUnitId)) {
         return res.status(403).json({ message: "Unit out of scope." });
       }
-      if (parsed.data.ownerUnitId && !scopeUnitIds.includes(parsed.data.ownerUnitId)) {
-        return res.status(403).json({ message: "Target unit out of scope." });
-      }
       const isSuperAdmin = req.user?.role === "super_admin";
       if (!isEditableStatus(existing.workflowStatus) && !isSuperAdmin) {
         return res.status(400).json({ message: "Training event is not editable." });
       }
       const nextStartDate = parsed.data.startDate ?? existing.startDate;
       const nextEndDate = parsed.data.endDate ?? existing.endDate;
+      const nextCategory = parsed.data.category ?? existing.category;
+      const nextProvider = parsed.data.provider ?? existing.provider;
+      const nextOwnerUnitId = parsed.data.ownerUnitId ?? existing.ownerUnitId;
       if (isStartDateAfterEndDate(nextStartDate, nextEndDate)) {
         return res.status(400).json({
           message: "Start date must be on or before end date.",
         });
       }
+      const resolvedOwnership = await resolveTrainingOwnerUnit(
+        nextCategory,
+        nextProvider,
+        nextOwnerUnitId,
+        scopeUnitIds,
+      );
+      if ("error" in resolvedOwnership) {
+        const { error } = resolvedOwnership;
+        return res
+          .status(error.status)
+          .json({ message: error.message });
+      }
       const [updated] = await db
         .update(trainingEvents)
         .set({
           ...parsed.data,
+          provider: resolvedOwnership.provider,
+          ownerUnitId: resolvedOwnership.ownerUnitId,
           hours: parsed.data.hours ? parsed.data.hours.toString() : undefined,
           updatedBy: req.user!.id,
           updatedAt: new Date(),
@@ -4239,20 +4369,23 @@ export async function registerRoutes(
       return res.json(emptyAnalytics);
     }
 
+    let allowedUnits = scopeUnitIds;
     if (parsed.data.unitId) {
       if (!scopeUnitIds.includes(parsed.data.unitId)) {
         return res.status(403).json({ message: "Unit out of scope." });
       }
+      allowedUnits =
+        parsed.data.includeChildren !== "false"
+          ? await getDescendantUnits(parsed.data.unitId, scopeUnitIds)
+          : [parsed.data.unitId];
     }
 
-    const providerScope = await getReportProviderScope(
-      parsed.data.unitId,
-      parsed.data.includeChildren,
-      scopeUnitIds,
-    );
+    const providerScope =
+      parsed.data.unitId
+        ? await getReportProviderScope(parsed.data.unitId, parsed.data.includeChildren, scopeUnitIds)
+        : await buildProviderScope(allowedUnits);
 
     const trainingFilters = [
-      inArray(trainingEvents.ownerUnitId, scopeUnitIds),
       trainingEventNotDeletedCondition(),
     ];
     if (parsed.data.from) {
@@ -4270,6 +4403,7 @@ export async function registerRoutes(
         provider: trainingEvents.provider,
         deliveryMode: trainingEvents.deliveryMode,
         ownerUnitId: trainingEvents.ownerUnitId,
+        visibilityScope: trainingEvents.visibilityScope,
         startDate: trainingEvents.startDate,
         endDate: trainingEvents.endDate,
         hours: trainingEvents.hours,
@@ -4279,7 +4413,9 @@ export async function registerRoutes(
       .from(trainingEvents)
       .where(and(...trainingFilters))
       .orderBy(asc(trainingEvents.startDate), asc(trainingEvents.title));
+    const parentMap = await getUnitParentMap();
     const scopedTrainingRows = accessibleTrainingRows.filter((row) =>
+      isTrainingEventVisibleToScope(row, allowedUnits, parentMap) ||
       isTrainingProvidedByScope(row, providerScope),
     );
 

@@ -201,6 +201,7 @@ export default function Trainings() {
   const [archiveDialogOpen, setArchiveDialogOpen] = useState(false);
   const [archiveTargetEvent, setArchiveTargetEvent] = useState<any | null>(null);
   const [archiveReason, setArchiveReason] = useState("");
+  const [isArchivingEvent, setIsArchivingEvent] = useState(false);
   const [isSavingEvent, setIsSavingEvent] = useState(false);
   const [submittingEventIds, setSubmittingEventIds] = useState<Record<string, boolean>>({});
   const [highlightedEventId, setHighlightedEventId] = useState<string | null>(null);
@@ -221,27 +222,18 @@ export default function Trainings() {
     queryKey: ["/api/units"],
     queryFn: getQueryFn({ on401: "throw" }),
   });
-  const { data: employeeData, isLoading: employeesLoading } = useQuery({
-    queryKey: ["/api/employees"],
-    queryFn: getQueryFn({ on401: "throw" }),
-  });
 
   const events = data?.trainingEvents ?? [];
   const units = unitData?.units ?? [];
-  const employees = employeeData?.employees ?? [];
   const unitNameById = useMemo(() => {
     return new Map(units.map((unit: any) => [unit.id, unit.name]));
   }, [units]);
   const internalProviderOptions = useMemo(() => {
-    const names = new Set<string>();
-    for (const employee of employees) {
-      const unitName = unitNameById.get(employee.unitId);
-      if (typeof unitName === "string" && unitName.trim().length > 0) {
-        names.add(unitName);
-      }
-    }
-    return Array.from(names).sort((a, b) => a.localeCompare(b));
-  }, [employees, unitNameById]);
+    return units
+      .map((unit: any) => unit.name)
+      .filter((name: unknown): name is string => typeof name === "string" && name.trim().length > 0)
+      .sort((a: string, b: string) => a.localeCompare(b));
+  }, [units]);
   const providerOptions = useMemo(() => {
     if (!form.provider) return internalProviderOptions;
     if (internalProviderOptions.includes(form.provider)) return internalProviderOptions;
@@ -315,7 +307,7 @@ export default function Trainings() {
         return getEventSortTime(b) - getEventSortTime(a);
       });
   }, [events, statusFilter, categoryFilter, providerFilter, recentEventId]);
-  const isPageLoading = trainingsLoading || unitsLoading || employeesLoading;
+  const isPageLoading = trainingsLoading || unitsLoading;
 
   const handleExportTrainings = () => {
     const csvRows = filtered.map((event: any) => ({
@@ -420,7 +412,7 @@ export default function Trainings() {
   };
 
   const handleCreateOrUpdate = async () => {
-    const ownerUnitId = form.ownerUnitId || units[0]?.id;
+    const defaultOwnerUnitId = form.ownerUnitId || units[0]?.id;
     if (!form.title.trim()) {
       toast({ variant: "destructive", title: "Title is required." });
       return;
@@ -433,7 +425,7 @@ export default function Trainings() {
       toast({ variant: "destructive", title: "Start date must be on or before end date." });
       return;
     }
-    if (!ownerUnitId) {
+    if (!defaultOwnerUnitId) {
       toast({ variant: "destructive", title: "No owner unit available for your account." });
       return;
     }
@@ -453,6 +445,18 @@ export default function Trainings() {
       toast({ variant: "destructive", title: "Hours must be greater than 0." });
       return;
     }
+    const internalProviderUnit =
+      form.category === "internal"
+        ? units.find((unit: any) => typeof unit.name === "string" && unit.name === provider)
+        : null;
+    if (form.category === "internal" && !internalProviderUnit) {
+      toast({
+        variant: "destructive",
+        title: "Select a valid provider unit.",
+      });
+      return;
+    }
+    const ownerUnitId = internalProviderUnit?.id || defaultOwnerUnitId;
 
     try {
       setIsSavingEvent(true);
@@ -534,15 +538,26 @@ export default function Trainings() {
 
   const handleArchive = async () => {
     if (!archiveTargetEvent) return;
-    await apiRequest("DELETE", `/api/training-events/${archiveTargetEvent.id}`, {
-      reason: archiveReason.trim(),
-    });
-    await queryClient.invalidateQueries({ queryKey: ["/api/training-events"] });
-    setArchiveDialogOpen(false);
-    setArchiveTargetEvent(null);
-    setArchiveReason("");
-    if (detailsEvent?.id === archiveTargetEvent.id) {
-      setDetailsEvent(null);
+    try {
+      setIsArchivingEvent(true);
+      await apiRequest("DELETE", `/api/training-events/${archiveTargetEvent.id}`, {
+        reason: archiveReason.trim(),
+      });
+      await queryClient.invalidateQueries({ queryKey: ["/api/training-events"] });
+      setArchiveDialogOpen(false);
+      setArchiveTargetEvent(null);
+      setArchiveReason("");
+      if (detailsEvent?.id === archiveTargetEvent.id) {
+        setDetailsEvent(null);
+      }
+    } catch (error) {
+      toast({
+        variant: "destructive",
+        title: "Failed to archive training event",
+        description: parseApiError(error),
+      });
+    } finally {
+      setIsArchivingEvent(false);
     }
   };
 
@@ -627,14 +642,22 @@ export default function Trainings() {
                       <label className="text-sm font-medium">Provider (Department/College)</label>
                       <Select
                         value={form.provider}
-                        onValueChange={(value) => setForm((prev) => ({ ...prev, provider: value }))}
+                        onValueChange={(value) =>
+                          setForm((prev) => ({
+                            ...prev,
+                            provider: value,
+                            ownerUnitId:
+                              units.find((unit: any) => typeof unit.name === "string" && unit.name === value)?.id ||
+                              prev.ownerUnitId,
+                          }))
+                        }
                       >
                         <SelectTrigger>
                           <SelectValue placeholder="Provider (Department/College)" />
                         </SelectTrigger>
                         <SelectContent>
                           {providerOptions.length > 0 ? (
-                            providerOptions.map((providerName) => (
+                            providerOptions.map((providerName: string) => (
                               <SelectItem key={providerName} value={providerName}>
                                 {providerName}
                               </SelectItem>
@@ -1081,6 +1104,7 @@ export default function Trainings() {
       <Dialog
         open={archiveDialogOpen}
         onOpenChange={(open) => {
+          if (isArchivingEvent) return;
           setArchiveDialogOpen(open);
           if (!open) {
             setArchiveTargetEvent(null);
@@ -1103,10 +1127,17 @@ export default function Trainings() {
             />
             <Button
               variant="destructive"
-              disabled={archiveReason.trim().length < 3}
+              disabled={archiveReason.trim().length < 3 || isArchivingEvent}
               onClick={handleArchive}
             >
-              Archive
+              {isArchivingEvent ? (
+                <>
+                  <Spinner className="mr-2 h-4 w-4" />
+                  Archiving...
+                </>
+              ) : (
+                "Archive"
+              )}
             </Button>
           </div>
         </DialogContent>
