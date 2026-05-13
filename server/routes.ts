@@ -31,6 +31,11 @@ import {
 import { requireAnyRoleOrSuperAdmin, requireAuth, requireRole } from "./middleware/auth";
 import { getScopedUnitIds, getUnitsInScopeForUser } from "./scope";
 import { logAudit, logWorkflowAction } from "./audit";
+import {
+  AUDIT_QUERY_TIMEOUT_MS,
+  buildAuditWhereConditions,
+  parseAuditQueryParams,
+} from "./audit-query";
 
 const uploadRoot = path.resolve("uploads");
 
@@ -431,30 +436,6 @@ async function isEntityInScope(
     .where(and(eq(employees.id, attendanceRow.employeeId), employeeNotDeletedCondition()))
     .limit(1);
   return !!employeeRow && scopeUnitIds.includes(employeeRow.unitId);
-}
-
-async function canUserViewAuditLog(
-  row: typeof auditLogs.$inferSelect,
-  user: Express.User,
-  scopeUnitIds: string[],
-) {
-  if (user.role === "super_admin" || user.role === "hr_qa_approver") {
-    return true;
-  }
-  if (row.actorUserId && row.actorUserId === user.id) {
-    return true;
-  }
-  if (!row.entityId) {
-    return false;
-  }
-  if (
-    row.entityType === "attendance_record" ||
-    row.entityType === "training_event" ||
-    row.entityType === "employee"
-  ) {
-    return isEntityInScope(row.entityType, row.entityId, scopeUnitIds);
-  }
-  return false;
 }
 
 async function getDescendantUnits(
@@ -5093,52 +5074,84 @@ export async function registerRoutes(
       "viewer_auditor",
     ]),
     async (req, res) => {
-      const querySchema = z.object({
-        entityType: z.string().optional(),
-        entityId: z.string().uuid().optional(),
-      });
-      const parsed = querySchema.safeParse(req.query);
+      const parsed = parseAuditQueryParams(req.query);
       if (!parsed.success) {
-        return res.status(400).json({ message: parsed.error.flatten() });
-      }
-      const filters = [];
-      if (parsed.data.entityType) {
-        filters.push(eq(auditLogs.entityType, parsed.data.entityType));
-      }
-      if (parsed.data.entityId) {
-        filters.push(eq(auditLogs.entityId, parsed.data.entityId));
-      }
-      const rows = await db
-        .select()
-        .from(auditLogs)
-        .where(filters.length > 0 ? and(...filters) : undefined)
-        .orderBy(desc(auditLogs.createdAt));
-
-      if (req.user!.role === "super_admin" || req.user!.role === "hr_qa_approver") {
-        return res.json({ logs: rows });
+        return res.status(400).json({ message: parsed.errors });
       }
 
-      const scopeUnitIds = await getScopedUnitIds(req.user!);
-      const scopedLogs = (
-        await Promise.all(
-          rows.map(async (row) => ({
-            row,
-            allowed: await canUserViewAuditLog(row, req.user!, scopeUnitIds),
-          })),
-        )
-      )
-        .filter((entry) => entry.allowed)
-        .map((entry) => entry.row);
+      const scopeUnitIds =
+        req.user!.role === "super_admin" || req.user!.role === "hr_qa_approver"
+          ? []
+          : await getScopedUnitIds(req.user!);
+      const filters = buildAuditWhereConditions({
+        query: parsed.data,
+        userId: req.user!.id,
+        role: req.user!.role,
+        scopeUnitIds,
+      });
+      const whereClause = and(...filters);
 
-      res.json({ logs: scopedLogs });
+      try {
+        const result = await db.transaction(async (tx) => {
+          await tx.execute(sql.raw(`set local statement_timeout = '${AUDIT_QUERY_TIMEOUT_MS}ms'`));
+          const [{ total }] = await tx
+            .select({ total: sql<number>`count(*)::int` })
+            .from(auditLogs)
+            .where(whereClause);
+          const rows = await tx
+            .select({
+              id: auditLogs.id,
+              actorUserId: auditLogs.actorUserId,
+              action: auditLogs.action,
+              entityType: auditLogs.entityType,
+              entityId: auditLogs.entityId,
+              beforeJson: auditLogs.beforeJson,
+              afterJson: auditLogs.afterJson,
+              createdAt: auditLogs.createdAt,
+              ip: auditLogs.ip,
+            })
+            .from(auditLogs)
+            .where(whereClause)
+            .orderBy(desc(auditLogs.createdAt))
+            .limit(parsed.data.pageSize)
+            .offset(parsed.data.offset);
+
+          const totalPages = Math.max(1, Math.ceil(total / parsed.data.pageSize));
+          return {
+            logs: rows,
+            pagination: {
+              page: parsed.data.page,
+              pageSize: parsed.data.pageSize,
+              total,
+              totalPages,
+              hasNextPage: parsed.data.page < totalPages,
+              hasPreviousPage: parsed.data.page > 1,
+            },
+          };
+        });
+
+        res.json({
+          ...result,
+          filters: {
+            from: parsed.data.from.toISOString(),
+            to: parsed.data.to.toISOString(),
+          },
+        });
+      } catch (error: any) {
+        if (error?.code === "57014") {
+          return res.status(503).json({
+            message:
+              "Audit query timed out. Narrow the date range or filters and try again.",
+          });
+        }
+        throw error;
+      }
     },
   );
 
   app.use("/api", api);
   return httpServer;
 }
-
-
 
 
 

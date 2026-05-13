@@ -29,6 +29,13 @@
       "when": 1777000000000,
       "tag": "0003_align_training_owner_to_provider",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "5",
+      "when": 1778688000000,
+      "tag": "0004_audit_log_query_indexes",
+      "breakpoints": true
     }
   ]
 }

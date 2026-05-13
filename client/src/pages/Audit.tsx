@@ -1,10 +1,10 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { getQueryFn } from "@/lib/queryClient";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { LoadingState } from "@/components/ui/loading-state";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import {
   Card,
   CardContent,
@@ -27,7 +27,14 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { Download, Eye } from "lucide-react";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { AlertCircle, Download, Eye } from "lucide-react";
 
 type AuditRow = {
   id: string;
@@ -41,6 +48,24 @@ type AuditRow = {
   ip: string | null;
 };
 
+type AuditPagination = {
+  page: number;
+  pageSize: number;
+  total: number;
+  totalPages: number;
+  hasNextPage: boolean;
+  hasPreviousPage: boolean;
+};
+
+type AuditResponse = {
+  logs: AuditRow[];
+  pagination: AuditPagination;
+  filters: {
+    from: string;
+    to: string;
+  };
+};
+
 const entityLabelByType: Record<string, string> = {
   auth_session: "Authentication Session",
   user: "User Account",
@@ -50,6 +75,28 @@ const entityLabelByType: Record<string, string> = {
   attachment: "File Attachment",
   unit: "Department/Unit",
 };
+
+function useDebouncedValue<T>(value: T, delayMs = 350) {
+  const [debounced, setDebounced] = useState(value);
+
+  useEffect(() => {
+    const timeoutId = window.setTimeout(() => setDebounced(value), delayMs);
+    return () => window.clearTimeout(timeoutId);
+  }, [value, delayMs]);
+
+  return debounced;
+}
+
+async function fetchAuditLogs(params: URLSearchParams) {
+  const res = await fetch(`/api/audit?${params.toString()}`, {
+    credentials: "include",
+  });
+  if (!res.ok) {
+    const text = (await res.text()) || res.statusText;
+    throw new Error(text);
+  }
+  return (await res.json()) as AuditResponse;
+}
 
 function formatEntityLabel(entityType: string) {
   return entityLabelByType[entityType] || entityType.replace(/_/g, " ");
@@ -115,34 +162,60 @@ function toCsv(rows: AuditRow[]) {
 export default function Audit() {
   const [entityTypeFilter, setEntityTypeFilter] = useState("");
   const [searchFilter, setSearchFilter] = useState("");
+  const [fromDate, setFromDate] = useState("");
+  const [toDate, setToDate] = useState("");
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(25);
   const [selectedRow, setSelectedRow] = useState<AuditRow | null>(null);
+  const debouncedEntityType = useDebouncedValue(entityTypeFilter);
+  const debouncedSearch = useDebouncedValue(searchFilter);
 
-  const { data, isLoading } = useQuery<{ logs: AuditRow[] }>({
-    queryKey: ["/api/audit"],
-    queryFn: getQueryFn({ on401: "throw" }),
+  useEffect(() => {
+    setPage(1);
+  }, [debouncedEntityType, debouncedSearch, fromDate, toDate, pageSize]);
+
+  const auditParams = useMemo(() => {
+    const params = new URLSearchParams({
+      page: String(page),
+      pageSize: String(pageSize),
+    });
+    if (debouncedEntityType.trim()) {
+      params.set("entityType", debouncedEntityType.trim());
+    }
+    if (debouncedSearch.trim()) {
+      params.set("search", debouncedSearch.trim());
+    }
+    if (fromDate) {
+      params.set("from", fromDate);
+    }
+    if (toDate) {
+      params.set("to", toDate);
+    }
+    return params;
+  }, [debouncedEntityType, debouncedSearch, fromDate, page, pageSize, toDate]);
+
+  const { data, error, isFetching, isLoading } = useQuery<AuditResponse>({
+    queryKey: ["/api/audit", auditParams.toString()],
+    queryFn: () => fetchAuditLogs(auditParams),
   });
 
   const logs = data?.logs ?? [];
-  const filteredLogs = useMemo(() => {
-    return logs.filter((row) => {
-      const matchesEntityType = entityTypeFilter
-        ? `${row.entityType} ${formatEntityLabel(row.entityType)}`
-            .toLowerCase()
-            .includes(entityTypeFilter.toLowerCase())
-        : true;
-      const haystack = `${row.action} ${formatActionLabel(row.action)} ${row.entityType} ${formatEntityLabel(row.entityType)} ${row.entityId || ""} ${row.actorUserId || ""}`
-        .toLowerCase();
-      const matchesSearch = searchFilter ? haystack.includes(searchFilter.toLowerCase()) : true;
-      return matchesEntityType && matchesSearch;
-    });
-  }, [logs, entityTypeFilter, searchFilter]);
+  const pagination = data?.pagination;
+  const resultLabel = pagination
+    ? pagination.total === 0
+      ? "No matching audit events."
+      : `Showing ${(pagination.page - 1) * pagination.pageSize + 1}-${Math.min(
+          pagination.page * pagination.pageSize,
+          pagination.total,
+        )} of ${pagination.total} audit event(s).`
+    : "Audit events are paginated by the server.";
 
   if (isLoading) {
     return <LoadingState label="Loading audit logs..." className="min-h-[420px]" />;
   }
 
   const exportCsv = () => {
-    const csv = toCsv(filteredLogs);
+    const csv = toCsv(logs);
     const blob = new Blob([csv], { type: "text/csv" });
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
@@ -161,9 +234,9 @@ export default function Audit() {
             Review activity history and export filtered records.
           </p>
         </div>
-        <Button variant="outline" onClick={exportCsv} disabled={filteredLogs.length === 0}>
+        <Button variant="outline" onClick={exportCsv} disabled={logs.length === 0}>
           <Download className="mr-2 h-4 w-4" />
-          Export CSV
+          Export Page CSV
         </Button>
       </div>
 
@@ -172,24 +245,64 @@ export default function Audit() {
           <CardTitle>Filters</CardTitle>
           <CardDescription>Use plain-language filters to find specific activities.</CardDescription>
         </CardHeader>
-        <CardContent className="grid gap-3 md:grid-cols-2">
+        <CardContent className="grid gap-3 md:grid-cols-4">
           <Input
             value={entityTypeFilter}
             onChange={(event) => setEntityTypeFilter(event.target.value)}
-            placeholder="Filter record type (e.g. training event)"
+            placeholder="Record type"
           />
           <Input
             value={searchFilter}
             onChange={(event) => setSearchFilter(event.target.value)}
             placeholder="Search activity, record id, or actor id"
           />
+          <Input
+            type="date"
+            value={fromDate}
+            onChange={(event) => setFromDate(event.target.value)}
+            aria-label="Audit log from date"
+          />
+          <Input
+            type="date"
+            value={toDate}
+            onChange={(event) => setToDate(event.target.value)}
+            aria-label="Audit log to date"
+          />
         </CardContent>
       </Card>
 
+      {error ? (
+        <Alert variant="destructive">
+          <AlertCircle className="h-4 w-4" />
+          <AlertTitle>Audit logs could not be loaded</AlertTitle>
+          <AlertDescription>
+            {error instanceof Error ? error.message : "Please narrow the filters and try again."}
+          </AlertDescription>
+        </Alert>
+      ) : null}
+
       <Card className="border-border/60">
-        <CardHeader>
-          <CardTitle>Entries</CardTitle>
-          <CardDescription>{filteredLogs.length} matching audit event(s).</CardDescription>
+        <CardHeader className="gap-3 md:flex-row md:items-center md:justify-between">
+          <div>
+            <CardTitle>Entries</CardTitle>
+            <CardDescription>
+              {resultLabel}
+              {isFetching ? " Refreshing..." : ""}
+            </CardDescription>
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="text-sm text-muted-foreground">Rows</span>
+            <Select value={String(pageSize)} onValueChange={(value) => setPageSize(Number(value))}>
+              <SelectTrigger className="w-[92px]">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="25">25</SelectItem>
+                <SelectItem value="50">50</SelectItem>
+                <SelectItem value="100">100</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
         </CardHeader>
         <CardContent>
           <Table>
@@ -204,7 +317,7 @@ export default function Audit() {
               </TableRow>
             </TableHeader>
             <TableBody>
-              {filteredLogs.map((row) => (
+              {logs.map((row) => (
                 <TableRow key={row.id}>
                   <TableCell>
                     {new Date(row.createdAt).toLocaleString("en-US", {
@@ -236,8 +349,36 @@ export default function Audit() {
                   </TableCell>
                 </TableRow>
               ))}
+              {logs.length === 0 ? (
+                <TableRow>
+                  <TableCell colSpan={6} className="h-24 text-center text-muted-foreground">
+                    No audit events found for the selected filters.
+                  </TableCell>
+                </TableRow>
+              ) : null}
             </TableBody>
           </Table>
+          <div className="mt-4 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+            <div className="text-sm text-muted-foreground">
+              Page {pagination?.page ?? page} of {pagination?.totalPages ?? 1}
+            </div>
+            <div className="flex gap-2">
+              <Button
+                variant="outline"
+                onClick={() => setPage((current) => Math.max(1, current - 1))}
+                disabled={!pagination?.hasPreviousPage || isFetching}
+              >
+                Previous
+              </Button>
+              <Button
+                variant="outline"
+                onClick={() => setPage((current) => current + 1)}
+                disabled={!pagination?.hasNextPage || isFetching}
+              >
+                Next
+              </Button>
+            </div>
+          </div>
         </CardContent>
       </Card>
 
